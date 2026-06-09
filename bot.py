@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -165,7 +166,7 @@ Nur Dokumente, keine Erklärungen."""
         )
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text("❌ Ошибка. Попробуй снова: /start")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nПопробуй снова: /start")
 
     return ConversationHandler.END
 
@@ -191,7 +192,7 @@ def generate_pdf(lv_text: str, as_text: str, name: str) -> io.BytesIO:
             line = line.strip()
             if not line:
                 story.append(Spacer(1, 0.15*cm))
-            elif line.startswith('##') or (line.isupper() and len(line) > 3 and len(line) < 40):
+            elif line.startswith('##') or (line.isupper() and 3 < len(line) < 40):
                 clean = line.replace('#', '').strip()
                 story.append(Paragraph(clean, head_s))
             else:
@@ -216,7 +217,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-def main():
+async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     states = {s: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
               for s in range(NAME, CONFIRM)}
@@ -227,8 +228,11 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
