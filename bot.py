@@ -1,4 +1,6 @@
 import os
+import io
+import json
 import logging
 import asyncio
 from aiohttp import web
@@ -8,12 +10,16 @@ from telegram.ext import (
     filters, ContextTypes, ConversationHandler
 )
 import google.generativeai as genai
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.enums import TA_CENTER
-import io
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_JUSTIFY, TA_RIGHT
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    HRFlowable, PageBreak
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +30,11 @@ PORT = int(os.environ.get("PORT", 10000))
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"))
+
+# ---------- Фирменные цвета документа ----------
+ACCENT = colors.HexColor("#1F3A5F")   # тёмно-синий
+GREY = colors.HexColor("#6B7280")
+LINE = colors.HexColor("#C9D2DD")
 
 (NAME, BIRTH_DATE, BIRTH_PLACE, ADDRESS, PHONE, EMAIL,
  BERUF, UNTERNEHMEN, BILDUNG, SPRACHEN, ERFAHRUNG, STAERKEN, CONFIRM) = range(13)
@@ -50,6 +61,8 @@ FIELD_MAP = {
     SPRACHEN: "sprachen", ERFAHRUNG: "erfahrung", STAERKEN: "staerken"
 }
 
+
+# ============ ДИАЛОГ ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -102,6 +115,80 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CONFIRM
 
 
+# ============ ГЕНЕРАЦИЯ ============
+
+PROMPT_TEMPLATE = """Du bist ein erfahrener deutscher Bewerbungsberater.
+Erstelle aus den Kandidatendaten professionelle Bewerbungsunterlagen.
+
+KANDIDATENDATEN:
+- Name: {name}
+- Geburtsdatum: {birth_date}
+- Geburtsort: {birth_place}
+- Adresse: {address}
+- Telefon: {phone}
+- E-Mail: {email}
+- Angestrebte Ausbildung: {beruf}
+- Wunschunternehmen: {unternehmen}
+- Schulabschluss: {bildung}
+- Sprachen: {sprachen}
+- Berufserfahrung: {erfahrung}
+- Stärken/Hobbys: {staerken}
+
+REGELN:
+1. Antworte AUSSCHLIESSLICH mit gültigem JSON. Kein Markdown, keine ```-Blöcke, kein Text davor oder danach.
+2. Verwende NIEMALS Platzhalter wie [Datum einfügen] oder [Name der Schule]. Wenn eine Information fehlt, lasse das Feld weg oder formuliere sinnvoll aus dem Kontext.
+3. Das Anschreiben muss konkret sein: Bezug auf den Beruf, auf die Erfahrung des Kandidaten und auf seine Sprachkenntnisse. Keine Floskeln wie "hiermit bewerbe ich mich" als einziger Inhalt.
+4. Sprache: durchgehend Deutsch, Sie-Form im Anschreiben.
+5. Bei Zeiträumen nutze das Format "2022 – 2024" oder "seit 2024". Erfinde keine exakten Daten, die nicht ableitbar sind.
+
+JSON-STRUKTUR (genau einhalten):
+{{
+  "personal": {{
+    "name": "",
+    "address": "",
+    "phone": "",
+    "email": "",
+    "birth_date": "",
+    "birth_place": ""
+  }},
+  "job_title": "Angestrebte Ausbildung als ...",
+  "profile": "2-3 Sätze Kurzprofil über den Kandidaten",
+  "experience": [
+    {{"period": "", "title": "", "org": "", "bullets": ["", ""]}}
+  ],
+  "education": [
+    {{"period": "", "title": "", "org": ""}}
+  ],
+  "languages": [
+    {{"name": "Deutsch", "level": "B2"}}
+  ],
+  "skills": ["", ""],
+  "interests": ["", ""],
+  "letter": {{
+    "recipient": "Firmenname und ggf. Abteilung",
+    "city": "Stadt des Kandidaten",
+    "subject": "Bewerbung um einen Ausbildungsplatz als ...",
+    "salutation": "Sehr geehrte Damen und Herren,",
+    "paragraphs": ["Absatz 1", "Absatz 2", "Absatz 3", "Absatz 4"],
+    "closing": "Mit freundlichen Grüßen"
+  }}
+}}"""
+
+
+def parse_json_response(text: str) -> dict:
+    """Достаём JSON из ответа модели, даже если она обернула его в ```."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("```")[1]
+        if t.lstrip().lower().startswith("json"):
+            t = t.lstrip()[4:]
+    start = t.find("{")
+    end = t.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("В ответе модели не найден JSON")
+    return json.loads(t[start:end + 1])
+
+
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if "заново" in text.lower():
@@ -113,47 +200,32 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     d = context.user_data
-    prompt = f"""Du bist ein professioneller deutscher Bewerbungsassistent.
-Erstelle für folgenden Kandidaten professionelle Bewerbungsunterlagen auf Deutsch.
-
-Kandidatendaten:
-- Name: {d.get('name','')}
-- Geburtsdatum: {d.get('birth_date','')}
-- Geburtsort: {d.get('birth_place','')}
-- Adresse: {d.get('address','')}
-- Telefon: {d.get('phone','')}
-- E-Mail: {d.get('email','')}
-- Angestrebte Ausbildung: {d.get('beruf','')}
-- Unternehmen: {d.get('unternehmen','') or 'allgemein'}
-- Bildung: {d.get('bildung','')}
-- Sprachen: {d.get('sprachen','')}
-- Erfahrung: {d.get('erfahrung','') or 'keine'}
-- Stärken: {d.get('staerken','') or 'nicht angegeben'}
-
-Erstelle:
-1. Professionellen tabellarischen LEBENSLAUF
-2. Überzeugendes ANSCHREIBEN
-
-Trenne mit ===LEBENSLAUF=== und ===ANSCHREIBEN===
-Nur Dokumente, keine Erklärungen. Keine Platzhalter in eckigen Klammern verwenden."""
+    prompt = PROMPT_TEMPLATE.format(
+        name=d.get('name', ''),
+        birth_date=d.get('birth_date', ''),
+        birth_place=d.get('birth_place', ''),
+        address=d.get('address', ''),
+        phone=d.get('phone', ''),
+        email=d.get('email', ''),
+        beruf=d.get('beruf', ''),
+        unternehmen=d.get('unternehmen', '') or 'nicht angegeben',
+        bildung=d.get('bildung', ''),
+        sprachen=d.get('sprachen', ''),
+        erfahrung=d.get('erfahrung', '') or 'keine',
+        staerken=d.get('staerken', '') or 'nicht angegeben',
+    )
 
     try:
         response = await asyncio.to_thread(model.generate_content, prompt)
-        result = response.text
-        lv_text = ""
-        as_text = ""
+        data = parse_json_response(response.text)
 
-        if "===LEBENSLAUF===" in result:
-            s = result.index("===LEBENSLAUF===") + len("===LEBENSLAUF===")
-            e = result.index("===ANSCHREIBEN===") if "===ANSCHREIBEN===" in result else len(result)
-            lv_text = result[s:e].strip()
-        if "===ANSCHREIBEN===" in result:
-            s = result.index("===ANSCHREIBEN===") + len("===ANSCHREIBEN===")
-            as_text = result[s:].strip()
-        if not lv_text and not as_text:
-            lv_text = result.strip()
+        # подстраховка: свои данные важнее, чем то, что придумала модель
+        personal = data.setdefault("personal", {})
+        for k in ("name", "address", "phone", "email", "birth_date", "birth_place"):
+            if d.get(k):
+                personal[k] = d[k]
 
-        pdf_buf = generate_pdf(lv_text, as_text)
+        pdf_buf = build_pdf(data)
         name_clean = (d.get('name') or 'Kandidat').replace(' ', '_')
 
         await update.message.reply_document(
@@ -173,40 +245,195 @@ Nur Dokumente, keine Erklärungen. Keine Platzhalter in eckigen Klammern verwend
     return ConversationHandler.END
 
 
-def generate_pdf(lv_text: str, as_text: str) -> io.BytesIO:
+# ============ ВЁРСТКА PDF ============
+
+def _styles():
+    base = getSampleStyleSheet()
+    return {
+        "name": ParagraphStyle("name", parent=base["Normal"], fontName="Helvetica-Bold",
+                               fontSize=22, leading=26, textColor=ACCENT, spaceAfter=2),
+        "role": ParagraphStyle("role", parent=base["Normal"], fontName="Helvetica",
+                               fontSize=11, leading=14, textColor=GREY, spaceAfter=6),
+        "contact": ParagraphStyle("contact", parent=base["Normal"], fontName="Helvetica",
+                                  fontSize=9, leading=13, textColor=colors.black),
+        "section": ParagraphStyle("section", parent=base["Normal"], fontName="Helvetica-Bold",
+                                  fontSize=10.5, leading=13, textColor=ACCENT,
+                                  spaceBefore=12, spaceAfter=4),
+        "period": ParagraphStyle("period", parent=base["Normal"], fontName="Helvetica",
+                                 fontSize=9, leading=13, textColor=GREY),
+        "title": ParagraphStyle("title", parent=base["Normal"], fontName="Helvetica-Bold",
+                                fontSize=10, leading=13),
+        "body": ParagraphStyle("body", parent=base["Normal"], fontName="Helvetica",
+                               fontSize=9.5, leading=13.5),
+        "bullet": ParagraphStyle("bullet", parent=base["Normal"], fontName="Helvetica",
+                                 fontSize=9.5, leading=13.5, leftIndent=10,
+                                 bulletIndent=2, spaceAfter=1),
+        "letterbody": ParagraphStyle("letterbody", parent=base["Normal"], fontName="Helvetica",
+                                     fontSize=10, leading=15, alignment=TA_JUSTIFY,
+                                     spaceAfter=9),
+        "right": ParagraphStyle("right", parent=base["Normal"], fontName="Helvetica",
+                                fontSize=10, leading=14, alignment=TA_RIGHT),
+        "subject": ParagraphStyle("subject", parent=base["Normal"], fontName="Helvetica-Bold",
+                                  fontSize=10.5, leading=14, spaceAfter=10),
+    }
+
+
+def _rule():
+    return HRFlowable(width="100%", thickness=0.8, color=LINE,
+                      spaceBefore=1, spaceAfter=6)
+
+
+def _two_col(rows, s):
+    """Таблица: слева период, справа содержимое."""
+    t = Table(rows, colWidths=[3.4 * cm, 12.6 * cm])
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    return t
+
+
+def build_pdf(data: dict) -> io.BytesIO:
+    s = _styles()
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4,
-                            rightMargin=2*cm, leftMargin=2*cm,
-                            topMargin=2*cm, bottomMargin=2*cm)
-    styles = getSampleStyleSheet()
-    title_s = ParagraphStyle('T', parent=styles['Heading1'],
-                             fontSize=16, spaceAfter=12, alignment=TA_CENTER)
-    head_s = ParagraphStyle('H', parent=styles['Heading2'],
-                            fontSize=11, spaceAfter=6, spaceBefore=10)
-    body_s = ParagraphStyle('B', parent=styles['Normal'],
-                            fontSize=10, spaceAfter=3, leading=14)
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=2.5 * cm, rightMargin=2 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm,
+        title="Bewerbungsunterlagen",
+    )
+
+    p = data.get("personal", {})
     story = []
 
-    def add_section(text, label):
-        story.append(Paragraph(label, title_s))
-        story.append(Spacer(1, 0.3*cm))
-        for line in text.split('\n'):
-            line = line.strip()
-            if not line:
-                story.append(Spacer(1, 0.15*cm))
-            elif line.startswith('##') or (line.isupper() and 3 < len(line) < 40):
-                clean = line.replace('#', '').strip()
-                story.append(Paragraph(clean, head_s))
-            else:
-                clean = line.replace('**', '').replace('*', '').replace('#', '')
-                if clean:
-                    story.append(Paragraph(clean, body_s))
+    # ---------- Шапка ----------
+    story.append(Paragraph(p.get("name", ""), s["name"]))
+    if data.get("job_title"):
+        story.append(Paragraph(data["job_title"], s["role"]))
 
-    if lv_text:
-        add_section(lv_text, "LEBENSLAUF")
-    if as_text:
-        story.append(Spacer(1, 0.8*cm))
-        add_section(as_text, "ANSCHREIBEN")
+    contact_bits = []
+    if p.get("address"):
+        contact_bits.append(p["address"])
+    if p.get("phone"):
+        contact_bits.append(p["phone"])
+    if p.get("email"):
+        contact_bits.append(p["email"])
+    if contact_bits:
+        story.append(Paragraph(" &nbsp;·&nbsp; ".join(contact_bits), s["contact"]))
+    story.append(Spacer(1, 6))
+    story.append(HRFlowable(width="100%", thickness=1.6, color=ACCENT, spaceAfter=4))
+
+    story.append(Paragraph("LEBENSLAUF", s["section"]))
+
+    # ---------- Кратко о себе ----------
+    if data.get("profile"):
+        story.append(Paragraph("Kurzprofil", s["section"]))
+        story.append(_rule())
+        story.append(Paragraph(data["profile"], s["body"]))
+
+    # ---------- Личные данные ----------
+    rows = []
+    if p.get("birth_date"):
+        rows.append([Paragraph("Geburtsdatum", s["period"]),
+                     Paragraph(p["birth_date"], s["body"])])
+    if p.get("birth_place"):
+        rows.append([Paragraph("Geburtsort", s["period"]),
+                     Paragraph(p["birth_place"], s["body"])])
+    if rows:
+        story.append(Paragraph("Persönliche Daten", s["section"]))
+        story.append(_rule())
+        story.append(_two_col(rows, s))
+
+    # ---------- Опыт работы ----------
+    exp = data.get("experience") or []
+    if exp:
+        story.append(Paragraph("Berufserfahrung", s["section"]))
+        story.append(_rule())
+        rows = []
+        for item in exp:
+            right = []
+            head = item.get("title", "")
+            if item.get("org"):
+                head = f"{head} &nbsp;|&nbsp; {item['org']}" if head else item["org"]
+            if head:
+                right.append(Paragraph(head, s["title"]))
+            for b in item.get("bullets") or []:
+                right.append(Paragraph(b, s["bullet"], bulletText="•"))
+            rows.append([Paragraph(item.get("period", ""), s["period"]), right])
+        story.append(_two_col(rows, s))
+
+    # ---------- Образование ----------
+    edu = data.get("education") or []
+    if edu:
+        story.append(Paragraph("Ausbildung & Schulbildung", s["section"]))
+        story.append(_rule())
+        rows = []
+        for item in edu:
+            head = item.get("title", "")
+            if item.get("org"):
+                head = f"{head} &nbsp;|&nbsp; {item['org']}" if head else item["org"]
+            rows.append([Paragraph(item.get("period", ""), s["period"]),
+                         Paragraph(head, s["title"])])
+        story.append(_two_col(rows, s))
+
+    # ---------- Языки ----------
+    langs = data.get("languages") or []
+    if langs:
+        story.append(Paragraph("Sprachkenntnisse", s["section"]))
+        story.append(_rule())
+        rows = [[Paragraph(l.get("name", ""), s["title"]),
+                 Paragraph(l.get("level", ""), s["body"])] for l in langs]
+        story.append(_two_col(rows, s))
+
+    # ---------- Навыки ----------
+    skills = data.get("skills") or []
+    if skills:
+        story.append(Paragraph("Kenntnisse & Stärken", s["section"]))
+        story.append(_rule())
+        story.append(Paragraph(" &nbsp;·&nbsp; ".join(skills), s["body"]))
+
+    # ---------- Интересы ----------
+    interests = data.get("interests") or []
+    if interests:
+        story.append(Paragraph("Interessen", s["section"]))
+        story.append(_rule())
+        story.append(Paragraph(" &nbsp;·&nbsp; ".join(interests), s["body"]))
+
+    # ---------- Anschreiben ----------
+    letter = data.get("letter") or {}
+    if letter:
+        story.append(PageBreak())
+
+        story.append(Paragraph(p.get("name", ""), s["title"]))
+        for bit in (p.get("address"), p.get("phone"), p.get("email")):
+            if bit:
+                story.append(Paragraph(bit, s["contact"]))
+        story.append(Spacer(1, 22))
+
+        if letter.get("recipient"):
+            for line in str(letter["recipient"]).split("\n"):
+                story.append(Paragraph(line, s["letterbody"]))
+        story.append(Spacer(1, 14))
+
+        if letter.get("city"):
+            story.append(Paragraph(letter["city"], s["right"]))
+        story.append(Spacer(1, 16))
+
+        if letter.get("subject"):
+            story.append(Paragraph(letter["subject"], s["subject"]))
+        if letter.get("salutation"):
+            story.append(Paragraph(letter["salutation"], s["letterbody"]))
+
+        for para in letter.get("paragraphs") or []:
+            story.append(Paragraph(para, s["letterbody"]))
+
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(letter.get("closing", "Mit freundlichen Grüßen"), s["letterbody"]))
+        story.append(Spacer(1, 26))
+        story.append(Paragraph(p.get("name", ""), s["body"]))
 
     doc.build(story)
     buf.seek(0)
@@ -219,7 +446,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- Мини веб-сервер, чтобы Render видел открытый порт ---
+# ============ ВЕБ-СЕРВЕР ДЛЯ RENDER ============
+
 async def health(request):
     return web.Response(text="Bot is alive")
 
@@ -238,8 +466,8 @@ async def main():
     await run_web_server()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    states = {s: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
-              for s in range(NAME, CONFIRM)}
+    states = {st: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
+              for st in range(NAME, CONFIRM)}
     states[CONFIRM] = [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm)]
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
