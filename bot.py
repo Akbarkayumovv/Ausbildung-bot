@@ -40,11 +40,11 @@ LABEL = colors.HexColor("#8B8B8B")    # серые подписи слева
 DARK = colors.HexColor("#222222")     # основной текст
 
 # ---------- Состояния диалога ----------
-(NAME, BIRTH_DATE, BIRTH_PLACE, NATIONALITY, ADDRESS, PHONE, EMAIL,
+(NAME, BIRTH_DATE, BIRTH_PLACE, ADDRESS, PHONE, EMAIL,
  BERUF, UNTERNEHMEN, START_DATE,
  SCHULE, WEITERBILDUNG, ERFAHRUNG, PRAKTIKA,
  SPRACHEN, FACHKENNTNISSE, INTERESSEN, MOTIVATION,
- PHOTO, CONFIRM) = range(20)
+ PHOTO, CONFIRM) = range(19)
 
 SKIP = "\n\n_Нечего указать — напиши_ *пропустить*"
 
@@ -53,7 +53,7 @@ TEMPLATES = {
     NAME:        "👤 *Vor- und Nachname*\n\nНапример: {ex}",
     BIRTH_DATE:  "📅 *Geburtsdatum*\n\nФормат: {ex}",
     BIRTH_PLACE: "📍 *Geburtsort*\n\nНапример: {ex}",
-    ADDRESS:     "🏠 *Adresse *\n\nНапример: {ex}",
+    ADDRESS:     "🏠 *Adresse*\n\nТекущий адрес — в Германии или за границей.\nНапример: {ex}",
     PHONE:       "📞 *Telefonnummer*\n\nНапример: {ex}",
     EMAIL:       "📧 *E-Mail*\n\nНапример: {ex}",
 
@@ -92,9 +92,10 @@ EXAMPLES = {
     BIRTH_DATE: ["`05.01.2002`", "`17.09.1999`", "`23.03.2005`"],
     BIRTH_PLACE: ["`Chudschand, Tadschikistan`", "`Samarkand, Usbekistan`",
                   "`Bischkek, Kirgisistan`", "`Almaty, Kasachstan`"],
-    NATIONALITY: ["`tadschikisch`", "`usbekisch`", "`kirgisisch`", "`kasachisch`"],
     ADDRESS: ["`Bahnhofstraße 24, 04109 Leipzig`", "`Hauptstraße 11, 97318 Kitzingen`",
-              "`Lindenweg 7, 28195 Bremen`", "`Gartenstraße 63, 90402 Nürnberg`"],
+              "`ul. Rudaki 45, 734000 Duschanbe, Tadschikistan`",
+              "`ul. Navoi 12, 100011 Taschkent, Usbekistan`",
+              "`Lindenweg 7, 28195 Bremen`"],
     PHONE: ["`+49 151 12345678`", "`+49 160 9876543`", "`+49 176 4455667`"],
     EMAIL: ["`rustam.ismoilov@gmail.com`", "`a.karimova@web.de`", "`d.nazarov02@gmail.com`"],
 
@@ -159,7 +160,7 @@ def question_text(state: int) -> str:
 
 FIELD_MAP = {
     NAME: "name", BIRTH_DATE: "birth_date", BIRTH_PLACE: "birth_place",
-    NATIONALITY: "nationality", ADDRESS: "address", PHONE: "phone", EMAIL: "email",
+    ADDRESS: "address", PHONE: "phone", EMAIL: "email",
     BERUF: "beruf", UNTERNEHMEN: "unternehmen", START_DATE: "start_date",
     SCHULE: "schule", WEITERBILDUNG: "weiterbildung",
     ERFAHRUNG: "erfahrung", PRAKTIKA: "praktika",
@@ -201,7 +202,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🇩🇪 *Ausbildung Agent*\n\n"
         "Составлю профессиональный немецкий Lebenslauf и Anschreiben.\n\n"
-        "Будет 18 вопросов — часть можно пропустить. "
+        "Будет 17 вопросов — часть можно пропустить. "
         "Чем подробнее ответишь, тем сильнее получатся документы.\n\n"
         "Поехали 👇",
         parse_mode="Markdown"
@@ -251,7 +252,6 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ *Проверь данные:*\n\n"
         f"👤 {val('name')}\n"
         f"📅 {val('birth_date')} · {val('birth_place')}\n"
-        f"🌐 {val('nationality', 'не указано')}\n"
         f"🏠 {val('address')}\n"
         f"📞 {val('phone')} · 📧 {val('email')}\n\n"
         f"💼 *{val('beruf')}*\n"
@@ -286,7 +286,6 @@ KANDIDATENDATEN (Rohangaben, teils auf Russisch):
 - Name: {name}
 - Geburtsdatum: {birth_date}
 - Geburtsort: {birth_place}
-- Staatsangehörigkeit: {nationality}
 - Adresse: {address}
 - Telefon: {phone}
 - E-Mail: {email}
@@ -341,7 +340,7 @@ JSON-STRUKTUR (genau einhalten):
 {{
   "personal": {{
     "name": "", "address": "", "phone": "", "email": "",
-    "birth_date": "", "birth_place": "", "nationality": ""
+    "birth_date": "", "birth_place": ""
   }},
   "job_title": "Angestrebte Ausbildung als ...",
   "profile": "2-3 Sätze Kurzprofil, klar auf den Zielberuf ausgerichtet",
@@ -395,7 +394,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = context.user_data
     prompt = PROMPT_TEMPLATE.format(**{
         k: (d.get(k) or "nicht angegeben") for k in [
-            "name", "birth_date", "birth_place", "nationality", "address", "phone",
+            "name", "birth_date", "birth_place", "address", "phone",
             "email", "beruf", "unternehmen", "start_date", "schule", "weiterbildung",
             "erfahrung", "praktika", "sprachen", "fachkenntnisse",
             "interessen", "motivation"]
@@ -408,7 +407,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Личные данные берём из ответов пользователя, а не из фантазии модели
         personal = data.setdefault("personal", {})
         for k in ("name", "address", "phone", "email",
-                  "birth_date", "birth_place", "nationality"):
+                  "birth_date", "birth_place"):
             if d.get(k):
                 personal[k] = d[k]
 
@@ -556,9 +555,6 @@ def build_pdf(data: dict, photo_bytes: bytes | None = None) -> io.BytesIO:
     geb = " in ".join(x for x in [p.get("birth_date"), p.get("birth_place")] if x)
     if geb:
         rows.append([Paragraph("Geburtsdaten", s["label"]), Paragraph(geb, s["value"])])
-    if p.get("nationality"):
-        rows.append([Paragraph("Staatsangehörigkeit", s["label"]),
-                     Paragraph(p["nationality"], s["value"])])
     section("Persönliche Daten", rows=rows, first=True)
 
     # ---------- Kurzprofil ----------
