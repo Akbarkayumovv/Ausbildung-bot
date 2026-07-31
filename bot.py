@@ -53,8 +53,7 @@ TEMPLATES = {
     NAME:        "👤 *Vor- und Nachname*\n\nНапример: {ex}",
     BIRTH_DATE:  "📅 *Geburtsdatum*\n\nФормат: {ex}",
     BIRTH_PLACE: "📍 *Geburtsort*\n\nНапример: {ex}",
-    NATIONALITY: "🌐 *Staatsangehörigkeit*\n\nНапример: {ex}" + SKIP,
-    ADDRESS:     "🏠 *Adresse в Германии*\n\nНапример: {ex}",
+    ADDRESS:     "🏠 *Adresse *\n\nНапример: {ex}",
     PHONE:       "📞 *Telefonnummer*\n\nНапример: {ex}",
     EMAIL:       "📧 *E-Mail*\n\nНапример: {ex}",
 
