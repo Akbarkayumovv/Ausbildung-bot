@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+PORT = int(os.environ.get("PORT", 10000))
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"))
@@ -84,11 +86,11 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {d.get('birth_date','—')} | 📍 {d.get('birth_place','—')}\n"
         f"🏠 {d.get('address','—')}\n"
         f"📞 {d.get('phone','—')} | 📧 {d.get('email','—')}\n"
-        f"💼 {d.get('beruf','—')} @ {d.get('unternehmen','—') or 'allgemein'}\n"
+        f"💼 {d.get('beruf','—')} @ {d.get('unternehmen','') or 'allgemein'}\n"
         f"🎓 {d.get('bildung','—')}\n"
         f"🌍 {d.get('sprachen','—')}\n"
-        f"💪 {d.get('erfahrung','—') or 'нет'}\n"
-        f"⭐ {d.get('staerken','—') or 'не указаны'}\n\n"
+        f"💪 {d.get('erfahrung','') or 'нет'}\n"
+        f"⭐ {d.get('staerken','') or 'не указаны'}\n\n"
         "Всё верно?"
     )
     keyboard = [["✅ Да, создать PDF!", "🔄 Начать заново"]]
@@ -133,10 +135,10 @@ Erstelle:
 2. Überzeugendes ANSCHREIBEN
 
 Trenne mit ===LEBENSLAUF=== und ===ANSCHREIBEN===
-Nur Dokumente, keine Erklärungen."""
+Nur Dokumente, keine Erklärungen. Keine Platzhalter in eckigen Klammern verwenden."""
 
     try:
-        response = model.generate_content(prompt)
+        response = await asyncio.to_thread(model.generate_content, prompt)
         result = response.text
         lv_text = ""
         as_text = ""
@@ -151,8 +153,8 @@ Nur Dokumente, keine Erklärungen."""
         if not lv_text and not as_text:
             lv_text = result.strip()
 
-        pdf_buf = generate_pdf(lv_text, as_text, d.get('name', 'Kandidat'))
-        name_clean = d.get('name', 'Kandidat').replace(' ', '_')
+        pdf_buf = generate_pdf(lv_text, as_text)
+        name_clean = (d.get('name') or 'Kandidat').replace(' ', '_')
 
         await update.message.reply_document(
             document=pdf_buf,
@@ -171,7 +173,7 @@ Nur Dokumente, keine Erklärungen."""
     return ConversationHandler.END
 
 
-def generate_pdf(lv_text: str, as_text: str, name: str) -> io.BytesIO:
+def generate_pdf(lv_text: str, as_text: str) -> io.BytesIO:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
                             rightMargin=2*cm, leftMargin=2*cm,
@@ -217,7 +219,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# --- Мини веб-сервер, чтобы Render видел открытый порт ---
+async def health(request):
+    return web.Response(text="Bot is alive")
+
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Health server running on port {PORT}")
+
+
 async def main():
+    await run_web_server()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     states = {s: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
               for s in range(NAME, CONFIRM)}
@@ -228,9 +247,11 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv)
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Bot polling started")
     await asyncio.Event().wait()
 
 
