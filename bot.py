@@ -8,7 +8,7 @@ from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes, ConversationHandler
+    filters, ContextTypes, PicklePersistence
 )
 import google.generativeai as genai
 
@@ -221,8 +221,15 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nxt = current + 1
     question = question_text(nxt)
-    if not question:                          # страховка от рассинхрона состояний
-        return await show_summary(update, context)
+    if not question:
+        # Раньше здесь был молчаливый переход к сводке — из-за него бот
+        # пропускал вопросы. Теперь честно сообщаем о сбое.
+        logger.error(f"Нет текста вопроса для состояния {nxt}. Диалог прерван.")
+        await update.message.reply_text(
+            "⚠️ Внутренний сбой на этом шаге. Напиши /start, чтобы начать заново."
+        )
+        context.user_data.clear()
+        return
 
     context.user_data["state"] = nxt
     await ask(update, question)
@@ -428,7 +435,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nПопробуй снова: /start")
 
-    return ConversationHandler.END
+    context.user_data.clear()
 
 
 # ================= ВЁРСТКА PDF =================
@@ -663,9 +670,33 @@ def build_pdf(data: dict, photo_bytes: bytes | None = None) -> io.BytesIO:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     await update.message.reply_text("Отменено. /start — начать заново.",
                                     reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
+
+
+async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Единая точка входа. Состояние живёт только в user_data — рассинхрону взяться неоткуда."""
+    state = context.user_data.get("state")
+
+    if state is None:
+        await update.message.reply_text(
+            "Диалог не начат или сессия сброшена.\n\nНапиши /start, чтобы создать документы."
+        )
+        return
+
+    if state == PHOTO:
+        return await collect_photo(update, context)
+    if state == CONFIRM:
+        if not update.message.text:
+            await update.message.reply_text("Нажми кнопку внизу: создать PDF или начать заново.")
+            return
+        return await confirm(update, context)
+
+    if not update.message.text:
+        await ask(update, question_text(state))
+        return
+    return await collect(update, context)
 
 
 # ================= ВЕБ-СЕРВЕР ДЛЯ RENDER =================
@@ -684,32 +715,35 @@ async def run_web_server():
 
 
 async def main():
+    # Самопроверка на старте: лучше увидеть проблему в логах Render,
+    # чем ловить её посреди диалога с живым кандидатом.
+    missing = [st for st in range(NAME, PHOTO + 1) if not TEMPLATES.get(st)]
+    if missing:
+        logger.critical(f"НЕТ ТЕКСТА ВОПРОСА для состояний: {missing}. Диалог будет рваться!")
+    else:
+        logger.info(f"Самопроверка пройдена: {len(TEMPLATES)} вопросов на месте")
+
     await run_web_server()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Состояние переживает перезапуск процесса — Render на бесплатном плане
+    # регулярно поднимает контейнер заново, и без этого диалог обрывался.
+    persistence = PicklePersistence(filepath="bot_state.pickle")
 
-    # /start и /cancel должны срабатывать на любом шаге, иначе диалог выглядит "зависшим"
-    restart = [CommandHandler("start", start), CommandHandler("cancel", cancel)]
+    app = (Application.builder()
+           .token(TELEGRAM_TOKEN)
+           .persistence(persistence)
+           .build())
 
-    states = {st: restart + [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
-              for st in range(NAME, PHOTO)}
-    states[PHOTO] = restart + [
-        MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, collect_photo)]
-    states[CONFIRM] = restart + [
-        MessageHandler(filters.TEXT & ~filters.COMMAND, confirm)]
-
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states=states,
-        fallbacks=restart,
-    )
-    app.add_handler(conv)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, router))
     app.add_error_handler(on_error)
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Bot polling started")
+    logger.info("Бот запущен и слушает сообщения")
     await asyncio.Event().wait()
 
 
