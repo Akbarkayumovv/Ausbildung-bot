@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import random
 import logging
 import asyncio
 from aiohttp import web
@@ -42,63 +43,120 @@ DARK = colors.HexColor("#222222")     # основной текст
 (NAME, BIRTH_DATE, BIRTH_PLACE, NATIONALITY, ADDRESS, PHONE, EMAIL,
  BERUF, UNTERNEHMEN, START_DATE,
  SCHULE, WEITERBILDUNG, ERFAHRUNG, PRAKTIKA,
- SPRACHEN, FACHKENNTNISSE, FUEHRERSCHEIN, STAERKEN, INTERESSEN, MOTIVATION,
- PHOTO, CONFIRM) = range(22)
+ SPRACHEN, FACHKENNTNISSE, INTERESSEN, MOTIVATION,
+ PHOTO, CONFIRM) = range(20)
 
-SKIP = "\n\n_Если нечего указать — напиши_ *пропустить*"
+SKIP = "\n\n_Нечего указать — напиши_ *пропустить*"
 
-QUESTIONS = {
-    NAME:        "👤 *Vor- und Nachname*\n\nНапример: `Ali Mustermann`",
-    BIRTH_DATE:  "📅 *Geburtsdatum*\n\nФормат: `05.01.2002`",
-    BIRTH_PLACE: "📍 *Geburtsort*\n\nНапример: `Duschanbe, Tadschikistan`",
-    NATIONALITY: "🌐 *Staatsangehörigkeit*\n\nНапример: `tadschikisch`" + SKIP,
-    ADDRESS:     "🏠 *Adresse в Германии*\n\nНапример: `Hauptstraße 11, 97318 Kitzingen`",
-    PHONE:       "📞 *Telefonnummer*\n\nНапример: `+49 151 12345678`",
-    EMAIL:       "📧 *E-Mail*\n\nНапример: `ali.mustermann@gmail.com`",
+# Шаблоны вопросов. {ex} подставляется случайно, чтобы примеры не приедались.
+TEMPLATES = {
+    NAME:        "👤 *Vor- und Nachname*\n\nНапример: {ex}",
+    BIRTH_DATE:  "📅 *Geburtsdatum*\n\nФормат: {ex}",
+    BIRTH_PLACE: "📍 *Geburtsort*\n\nНапример: {ex}",
+    NATIONALITY: "🌐 *Staatsangehörigkeit*\n\nНапример: {ex}" + SKIP,
+    ADDRESS:     "🏠 *Adresse в Германии*\n\nНапример: {ex}",
+    PHONE:       "📞 *Telefonnummer*\n\nНапример: {ex}",
+    EMAIL:       "📧 *E-Mail*\n\nНапример: {ex}",
 
     BERUF:       "💼 *Angestrebte Ausbildung / Stelle*\n\n"
-                 "Точное название профессии.\nНапример: `Hotelfachmann`, `Kfz-Mechatroniker`, `Pflegefachmann`",
-    UNTERNEHMEN: "🏢 *Unternehmen*\n\nКуда подаёшься — название и город.\n"
-                 "Например: `Hotel Freihof, Kitzingen`" + SKIP,
-    START_DATE:  "🗓 *Verfügbar ab*\n\nКогда можешь начать.\nНапример: `01.09.2026` или `sofort`" + SKIP,
+                 "Точное название профессии по-немецки.\nНапример: {ex}",
+    UNTERNEHMEN: "🏢 *Unternehmen*\n\nКуда подаёшься — название и город.\nНапример: {ex}" + SKIP,
+    START_DATE:  "🗓 *Verfügbar ab*\n\nКогда можешь начать.\nНапример: {ex}" + SKIP,
 
-    SCHULE:      "🎓 *Schulbildung*\n\nУкажи: годы, что окончил, где.\n"
-                 "Например: `2018–2020, Mittlere Reife, Schule Nr. 12, Duschanbe`",
-    WEITERBILDUNG: "📜 *Weitere Ausbildung / Studium / Kurse*\n\n"
-                 "Например: `2024, Ausbildung zum Hotelfachmann, IHK Würzburg`\n"
-                 "или `2023, Integrationskurs B1, VHS Kitzingen`" + SKIP,
+    SCHULE:      "🎓 *Schulbildung*\n\nГоды, что окончил, где.\nНапример: {ex}",
+    WEITERBILDUNG: "📜 *Kurse, Weiterbildung, Studium*\n\nНапример: {ex}" + SKIP,
 
     ERFAHRUNG:   "💪 *Berufserfahrung*\n\n"
-                 "Каждое место работы с новой строки в формате:\n"
+                 "Каждое место работы с новой строки:\n"
                  "`период — должность — компания — чем занимался`\n\n"
-                 "Например:\n"
-                 "`2022–2024 — Kellner — Restaurant Adler, Kitzingen — обслуживание до 40 гостей, касса`\n"
-                 "`2021–2022 — Küchenhilfe — Café Roma, Würzburg — подготовка блюд, склад`" + SKIP,
-    PRAKTIKA:    "🔧 *Praktika*\n\nСтажировки и практика.\n"
-                 "Например: `03.2025, 4 Wochen Praktikum im Rettungsdienst, BRK Kitzingen`" + SKIP,
+                 "Например:\n{ex}" + SKIP,
+    PRAKTIKA:    "🔧 *Praktika*\n\nСтажировки и практика.\nНапример: {ex}" + SKIP,
 
-    SPRACHEN:    "🌍 *Sprachkenntnisse*\n\nЯзык и уровень через запятую.\n"
-                 "Например: `Tadschikisch – Muttersprache, Russisch – C2, Deutsch – B2, Englisch – A2`",
-    FACHKENNTNISSE: "🛠 *Fachkenntnisse / EDV*\n\n"
-                 "Программы, техника, профессиональные навыки.\n"
-                 "Например: `MS Office – gut, Kassensysteme, HACCP-Grundlagen`" + SKIP,
-    FUEHRERSCHEIN: "🚗 *Führerschein*\n\nНапример: `Klasse B, seit 2023`" + SKIP,
+    SPRACHEN:    "🌍 *Sprachkenntnisse*\n\nЯзык и уровень через запятую.\nНапример: {ex}",
+    FACHKENNTNISSE: "🛠 *Fachkenntnisse*\n\n"
+                 "Программы, техника, сертификаты, профессиональные умения.\n"
+                 "Личные качества писать не нужно — я подберу их сам.\n\nНапример: {ex}" + SKIP,
 
-    STAERKEN:    "⭐ *Persönliche Stärken*\n\n"
-                 "Например: `teamfähig, belastbar, zuverlässig, gästeorientiert`" + SKIP,
-    INTERESSEN:  "🎯 *Interessen & Engagement*\n\n"
-                 "Хобби, волонтёрство, спорт.\n"
-                 "Например: `Fußball im Verein, Fitness, ehrenamtliche Übersetzungshilfe`" + SKIP,
-    MOTIVATION:  "🔥 *Warum dieser Beruf?*\n\n"
-                 "Пару предложений своими словами — можно по-русски, я переведу.\n"
-                 "Это самая важная часть Anschreiben.\n\n"
-                 "Например: `Люблю работать с людьми, был официантом, хочу расти в гостиничном деле`",
+    INTERESSEN:  "🎯 *Interessen & Engagement*\n\nХобби, спорт, волонтёрство.\nНапример: {ex}" + SKIP,
+    MOTIVATION:  "🔥 *Почему именно эта профессия?*\n\n"
+                 "Пару предложений своими словами — можно по-русски, переведу.\n"
+                 "Это основа Anschreiben, отнесись серьёзно.\n\nНапример: {ex}",
 
     PHOTO:       "📸 *Bewerbungsfoto*\n\n"
                  "Пришли фото — оно встанет в правый верхний угол резюме.\n"
-                 "Лучше деловое, на светлом фоне.\n\n"
-                 "_Или напиши_ *пропустить*",
+                 "Лучше деловое, на светлом фоне.\n\n_Или напиши_ *пропустить*",
 }
+
+# Пулы примеров: разные города, разные отрасли, мужские и женские имена
+EXAMPLES = {
+    NAME: ["`Rustam Ismoilov`", "`Aziza Karimova`", "`Dilshod Nazarov`", "`Malika Yusupova`"],
+    BIRTH_DATE: ["`05.01.2002`", "`17.09.1999`", "`23.03.2005`"],
+    BIRTH_PLACE: ["`Chudschand, Tadschikistan`", "`Samarkand, Usbekistan`",
+                  "`Bischkek, Kirgisistan`", "`Almaty, Kasachstan`"],
+    NATIONALITY: ["`tadschikisch`", "`usbekisch`", "`kirgisisch`", "`kasachisch`"],
+    ADDRESS: ["`Bahnhofstraße 24, 04109 Leipzig`", "`Hauptstraße 11, 97318 Kitzingen`",
+              "`Lindenweg 7, 28195 Bremen`", "`Gartenstraße 63, 90402 Nürnberg`"],
+    PHONE: ["`+49 151 12345678`", "`+49 160 9876543`", "`+49 176 4455667`"],
+    EMAIL: ["`rustam.ismoilov@gmail.com`", "`a.karimova@web.de`", "`d.nazarov02@gmail.com`"],
+
+    BERUF: ["`Fachkraft für Lagerlogistik`, `Pflegefachmann`, `Elektroniker für Betriebstechnik`",
+            "`Kfz-Mechatroniker`, `Verkäuferin`, `Anlagenmechaniker SHK`",
+            "`Hotelfachfrau`, `Fachinformatiker`, `Zerspanungsmechaniker`",
+            "`Bäcker`, `Medizinische Fachangestellte`, `Maler und Lackierer`"],
+    UNTERNEHMEN: ["`Autohaus Krieger, Nürnberg`", "`Seniorenzentrum St. Anna, Leipzig`",
+                  "`Bäckerei Hofmann, Würzburg`", "`Elektro Schneider GmbH, Dresden`"],
+    START_DATE: ["`01.08.2027`", "`sofort`", "`nach Absprache`", "`ab Februar 2027`"],
+
+    SCHULE: ["`2017–2021, Schulabschluss (11 Klassen), Schule Nr. 8, Chudschand`",
+             "`2016–2020, Mittlere Reife, Gesamtschule Bremen-Nord`",
+             "`2015–2020, Abitur, Lyzeum Nr. 3, Samarkand`"],
+    WEITERBILDUNG: ["`2024, Integrationskurs B1, VHS Dresden`",
+                    "`2023, Schweißkurs MAG, Bildungszentrum Köln`",
+                    "`2022–2024, Studium Ökonomie (2 Jahre), Universität Duschanbe`",
+                    "`2025, Gabelstaplerschein, TÜV Nürnberg`"],
+
+    ERFAHRUNG: [
+        "`2022–2024 — Lagerhelfer — Möbelhaus Ritter, Nürnberg — Kommissionierung, Wareneingang`\n"
+        "`2020–2022 — Fahrer — Kurierdienst Sattler, Erfurt — Auslieferung, Tourenplanung`",
+
+        "`2021–2024 — Küchenhilfe — Restaurant Delphi, Hamburg — Speisenvorbereitung, Lager`\n"
+        "`2019–2021 — Verkäufer — Bäckerei Ulm, Augsburg — Kasse, Kundenberatung`",
+
+        "`2023–2025 — Pflegehelfer — Seniorenheim St. Josef, Köln — Grundpflege, Dokumentation`\n"
+        "`2021–2023 — Reinigungskraft — Klinikum Kassel — Stationsreinigung`",
+
+        "`2022–2025 — Monteur — Metallbau Berger, Stuttgart — Montage, Qualitätskontrolle`",
+    ],
+    PRAKTIKA: ["`03/2025, 4 Wochen Praktikum, Autohaus Behr, Stuttgart`",
+               "`09/2024, 3 Wochen Praktikum im Kindergarten, Leipzig`",
+               "`06/2025, 2 Wochen Praktikum im Rettungsdienst, BRK Würzburg`"],
+
+    SPRACHEN: ["`Tadschikisch – Muttersprache, Russisch – C2, Deutsch – B2, Englisch – A2`",
+               "`Usbekisch – Muttersprache, Russisch – C1, Deutsch – B1`",
+               "`Kirgisisch – Muttersprache, Russisch – C2, Deutsch – A2, Türkisch – B1`"],
+    FACHKENNTNISSE: ["`MS Office – gut, Gabelstaplerschein, Kassensysteme`",
+                     "`Schweißen MAG/WIG, technische Zeichnungen lesen, Führerschein Klasse B`",
+                     "`Pflegedokumentation, Blutdruckmessung, MS Office – Grundkenntnisse`",
+                     "`Windows/Linux, Netzwerktechnik Grundlagen, HTML`"],
+
+    INTERESSEN: ["`Fußball im Verein, Fahrradreparatur, Kochen`",
+                 "`Schach, Freiwillige Feuerwehr, Fitness`",
+                 "`Schwimmen, Fotografie, ehrenamtliche Übersetzungshilfe`"],
+    MOTIVATION: ["`Хочу работать руками, разбираюсь в технике, чинил машины с отцом`",
+                 "`Нравится помогать людям, ухаживал за бабушкой, хочу в медицину`",
+                 "`Работал на складе, нравится порядок и система, хочу расти до логиста`",
+                 "`Люблю общаться с людьми, был продавцом, хочу в гостиничное дело`"],
+}
+
+
+def question_text(state: int) -> str:
+    """Собирает вопрос, подставляя случайный пример из пула."""
+    tpl = TEMPLATES.get(state)
+    if tpl is None:
+        return ""
+    pool = EXAMPLES.get(state)
+    return tpl.format(ex=random.choice(pool)) if pool else tpl
+
 
 FIELD_MAP = {
     NAME: "name", BIRTH_DATE: "birth_date", BIRTH_PLACE: "birth_place",
@@ -107,7 +165,6 @@ FIELD_MAP = {
     SCHULE: "schule", WEITERBILDUNG: "weiterbildung",
     ERFAHRUNG: "erfahrung", PRAKTIKA: "praktika",
     SPRACHEN: "sprachen", FACHKENNTNISSE: "fachkenntnisse",
-    FUEHRERSCHEIN: "fuehrerschein", STAERKEN: "staerken",
     INTERESSEN: "interessen", MOTIVATION: "motivation",
 }
 
@@ -116,18 +173,41 @@ SKIP_WORDS = ["пропустить", "нет", "skip", "-", "keine", "нету"
 
 # ================= ДИАЛОГ =================
 
+async def ask(update: Update, text: str):
+    """Отправляет вопрос. Если Telegram не принял Markdown — шлём обычным текстом."""
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"Markdown отклонён, отправляю без разметки: {e}")
+        plain = text.replace("*", "").replace("`", "").replace("_", "")
+        await update.message.reply_text(plain)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Ничего не проглатываем молча: пишем в лог и предупреждаем пользователя."""
+    logger.error("Ошибка в обработчике", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ Что-то пошло не так. Напиши /start, чтобы начать заново."
+            )
+    except Exception:
+        pass
+
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["state"] = NAME
     await update.message.reply_text(
         "🇩🇪 *Ausbildung Agent*\n\n"
         "Составлю профессиональный немецкий Lebenslauf и Anschreiben.\n\n"
-        "Будет 20 вопросов — часть можно пропустить. "
+        "Будет 18 вопросов — часть можно пропустить. "
         "Чем подробнее ответишь, тем сильнее получатся документы.\n\n"
         "Поехали 👇",
         parse_mode="Markdown"
     )
-    await update.message.reply_text(QUESTIONS[NAME], parse_mode="Markdown")
+    await ask(update, question_text(NAME))
     return NAME
 
 
@@ -140,8 +220,12 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
 
     nxt = current + 1
+    question = question_text(nxt)
+    if not question:                          # страховка от рассинхрона состояний
+        return await show_summary(update, context)
+
     context.user_data["state"] = nxt
-    await update.message.reply_text(QUESTIONS[nxt], parse_mode="Markdown")
+    await ask(update, question)
     return nxt
 
 
@@ -180,8 +264,6 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔧 {val('praktika', 'нет')}\n\n"
         f"🌍 {val('sprachen')}\n"
         f"🛠 {val('fachkenntnisse', 'нет')}\n"
-        f"🚗 {val('fuehrerschein', 'нет')}\n"
-        f"⭐ {val('staerken', 'нет')}\n"
         f"🎯 {val('interessen', 'нет')}\n"
         f"🔥 {val('motivation', 'нет')}\n"
         f"📸 {'фото есть' if d.get('photo') else 'без фото'}\n\n"
@@ -199,7 +281,7 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= ГЕНЕРАЦИЯ =================
 
 PROMPT_TEMPLATE = """Du bist ein erfahrener deutscher Bewerbungsberater und erstellst Unterlagen
-für Bewerber aus Zentralasien, die eine Ausbildung in Deutschland suchen.
+für Bewerber aus Zentralasien, die eine Ausbildung oder Stelle in Deutschland suchen.
 
 KANDIDATENDATEN (Rohangaben, teils auf Russisch):
 - Name: {name}
@@ -209,34 +291,52 @@ KANDIDATENDATEN (Rohangaben, teils auf Russisch):
 - Adresse: {address}
 - Telefon: {phone}
 - E-Mail: {email}
-- Angestrebte Ausbildung: {beruf}
+- Angestrebter Beruf: {beruf}
 - Wunschunternehmen: {unternehmen}
 - Verfügbar ab: {start_date}
 - Schulbildung: {schule}
-- Weitere Ausbildung/Kurse: {weiterbildung}
+- Kurse/Weiterbildung: {weiterbildung}
 - Berufserfahrung: {erfahrung}
 - Praktika: {praktika}
 - Sprachen: {sprachen}
-- Fachkenntnisse/EDV: {fachkenntnisse}
-- Führerschein: {fuehrerschein}
-- Stärken: {staerken}
+- Fachkenntnisse: {fachkenntnisse}
 - Interessen: {interessen}
 - Motivation (eigene Worte, ggf. Russisch): {motivation}
 
-REGELN:
+GRUNDREGELN:
 1. Antworte AUSSCHLIESSLICH mit gültigem JSON. Kein Markdown, keine ```-Blöcke, kein Text davor oder danach.
-2. Alle Ausgaben auf Deutsch. Russische Eingaben sinngemäß ins Deutsche übertragen, nicht wörtlich.
+2. Alles auf Deutsch. Russische Eingaben sinngemäß übertragen, nicht wörtlich übersetzen.
 3. NIEMALS Platzhalter wie [Datum einfügen] oder [Name der Schule]. Fehlt eine Angabe, lasse den Eintrag weg.
-4. Erfinde keine Arbeitgeber, Schulen, Noten oder Zeiträume, die nicht in den Daten stehen.
-5. Berufserfahrung: pro Station 2-3 konkrete Tätigkeits-Stichpunkte, jeweils mit einem Verb beginnend
-   (z.B. "Betreuung von bis zu 40 Gästen pro Schicht"). Keine Floskeln.
-6. Anschreiben: 4 Absätze.
-   - Absatz 1: konkreter Einstieg mit Bezug auf Beruf und Unternehmen. NICHT mit "Hiermit bewerbe ich mich" beginnen.
-   - Absatz 2: bisherige Erfahrung und was daraus für diesen Beruf nützlich ist.
-   - Absatz 3: Motivation, Sprachkenntnisse, persönliche Stärken.
-   - Absatz 4: Verfügbarkeit und Bitte um ein Vorstellungsgespräch.
-   Sie-Form, sachlich, keine Übertreibungen.
-7. Zeiträume im Format "2022 – 2024", "seit 2024", "03/2025".
+4. Erfinde keine Arbeitgeber, Schulen, Zeiträume, Zertifikate oder Noten, die nicht in den Daten stehen.
+5. Zeiträume im Format "2022 – 2024", "seit 2024", "03/2025".
+
+BERUFSSPEZIFISCHE ANPASSUNG (wichtigster Punkt):
+6. Der angestrebte Beruf kann aus JEDER Branche stammen — Handwerk, Pflege, Logistik, Gastronomie,
+   Handel, Industrie, IT, Verwaltung, Bau, Landwirtschaft und so weiter.
+   Analysiere zuerst, welche Anforderungen in Deutschland typisch für genau diesen Beruf sind,
+   und richte das gesamte Dokument daran aus.
+7. Verwende die branchenübliche deutsche Fachterminologie dieses Berufs.
+   Beschreibe frühere Tätigkeiten so, dass ihr Bezug zum Zielberuf sichtbar wird.
+   Beispiel: Lagerarbeit → "Kommissionierung", "Wareneingangskontrolle";
+   Pflegehilfe → "Grundpflege", "Dokumentation"; Küche → "Mise en place", "HACCP".
+8. Leite 4–6 persönliche Stärken SELBST ab. Sie müssen doppelt passen:
+   zum Zielberuf UND belegbar durch die genannte Erfahrung des Kandidaten.
+   Pflege: z.B. Empathie, Belastbarkeit, Verantwortungsbewusstsein.
+   Logistik: z.B. Sorgfalt, körperliche Belastbarkeit, Termintreue.
+   Handwerk: z.B. handwerkliches Geschick, Genauigkeit, Sicherheitsbewusstsein.
+   Keine austauschbaren Listen, die auf jeden Beruf passen würden.
+9. Führerscheine, Zertifikate und Scheine nur nennen, wenn sie in den Angaben vorkommen.
+
+BERUFSERFAHRUNG:
+10. Pro Station 2–3 konkrete Tätigkeits-Stichpunkte, jeweils mit einem Substantiv oder Verb beginnend
+    (z.B. "Betreuung von bis zu 40 Gästen pro Schicht"). Keine Floskeln, keine Selbstlob-Sätze.
+
+ANSCHREIBEN (4 Absätze, Sie-Form, sachlich):
+11. Absatz 1: konkreter Einstieg mit Bezug auf Beruf und Unternehmen.
+    NICHT mit "Hiermit bewerbe ich mich" beginnen.
+    Absatz 2: bisherige Erfahrung und was daraus konkret für DIESEN Beruf nützlich ist.
+    Absatz 3: Motivation, Sprachkenntnisse, passende persönliche Stärken.
+    Absatz 4: Verfügbarkeit und Bitte um ein Vorstellungsgespräch.
 
 JSON-STRUKTUR (genau einhalten):
 {{
@@ -245,7 +345,7 @@ JSON-STRUKTUR (genau einhalten):
     "birth_date": "", "birth_place": "", "nationality": ""
   }},
   "job_title": "Angestrebte Ausbildung als ...",
-  "profile": "2-3 Sätze Kurzprofil",
+  "profile": "2-3 Sätze Kurzprofil, klar auf den Zielberuf ausgerichtet",
   "experience": [
     {{"period": "", "title": "", "org": "", "bullets": ["", ""]}}
   ],
@@ -256,8 +356,11 @@ JSON-STRUKTUR (genau einhalten):
     {{"period": "", "title": "", "org": "", "bullets": [""]}}
   ],
   "languages": [{{"name": "Deutsch", "level": "B2"}}],
-  "skills": [{{"label": "EDV-Kenntnisse", "value": "MS Office: gut"}}],
-  "interests": [{{"label": "Engagement", "value": ""}}],
+  "skills": [
+    {{"label": "Fachliche Kenntnisse", "value": "..."}},
+    {{"label": "Persönliche Stärken", "value": "vier bis sechs Stärken, durch Komma getrennt"}}
+  ],
+  "interests": [{{"label": "Sport", "value": ""}}],
   "letter": {{
     "recipient": "Firmenname\\nStraße\\nPLZ Ort",
     "city": "Wohnort des Kandidaten",
@@ -295,8 +398,8 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         k: (d.get(k) or "nicht angegeben") for k in [
             "name", "birth_date", "birth_place", "nationality", "address", "phone",
             "email", "beruf", "unternehmen", "start_date", "schule", "weiterbildung",
-            "erfahrung", "praktika", "sprachen", "fachkenntnisse", "fuehrerschein",
-            "staerken", "interessen", "motivation"]
+            "erfahrung", "praktika", "sprachen", "fachkenntnisse",
+            "interessen", "motivation"]
     })
 
     try:
@@ -590,18 +693,23 @@ async def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    states = {st: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
+    # /start и /cancel должны срабатывать на любом шаге, иначе диалог выглядит "зависшим"
+    restart = [CommandHandler("start", start), CommandHandler("cancel", cancel)]
+
+    states = {st: restart + [MessageHandler(filters.TEXT & ~filters.COMMAND, collect)]
               for st in range(NAME, PHOTO)}
-    states[PHOTO] = [MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND,
-                                    collect_photo)]
-    states[CONFIRM] = [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm)]
+    states[PHOTO] = restart + [
+        MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, collect_photo)]
+    states[CONFIRM] = restart + [
+        MessageHandler(filters.TEXT & ~filters.COMMAND, confirm)]
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states=states,
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=restart,
     )
     app.add_handler(conv)
+    app.add_error_handler(on_error)
 
     await app.initialize()
     await app.start()
