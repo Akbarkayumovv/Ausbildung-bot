@@ -3,7 +3,8 @@ import io
 import json
 import random
 import time
-from datetime import date
+from datetime import date, datetime
+import re
 import logging
 import asyncio
 from aiohttp import web
@@ -221,6 +222,131 @@ LABEL_BY_KEY = {key: EDIT_LABELS.get(st, key) for st, key in FIELD_MAP.items()}
 
 # ================= ДИАЛОГ =================
 
+# ================= ПРОВЕРКА ВВОДА =================
+
+def _clean_date(text: str):
+    """Приводит дату к ДД.ММ.ГГГГ.
+
+    Возвращает (значение, причина_ошибки). Различает «непонятный формат»
+    и «формат верный, но такого дня нет» — сообщения должны быть разными.
+    """
+    t = re.sub(r"[\s/\-]+", ".", text.strip())
+    m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", t)
+    if not m:
+        return None, "format"
+    d, mo, y = (int(x) for x in m.groups())
+    try:
+        return datetime(y, mo, d).strftime("%d.%m.%Y"), None
+    except ValueError:
+        return None, "nonexistent"
+
+
+def v_birth_date(text: str):
+    norm, why = _clean_date(text)
+    if not norm:
+        if why == "nonexistent":
+            return False, "Такой даты не существует. Проверь день и месяц."
+        return False, ("Не понял дату. Нужен формат *ДД.ММ.ГГГГ*\n"
+                       "Например: `05.01.2002`")
+
+    born = datetime.strptime(norm, "%d.%m.%Y").date()
+    today = date.today()
+    age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+    if born > today:
+        return False, "Дата рождения в будущем. Проверь год."
+    if age < 14:
+        return False, (f"По этой дате получается {age} лет. "
+                       "Для Ausbildung нужно минимум 14. Проверь год.")
+    if age > 70:
+        return False, f"По этой дате получается {age} лет. Проверь год."
+    return True, norm
+
+
+def v_phone(text: str):
+    raw = text.strip()
+    cleaned = re.sub(r"[\s()\-./]", "", raw)
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+
+    if not re.fullmatch(r"\+?\d+", cleaned):
+        return False, ("В номере лишние символы. Только цифры и знак «+».\n"
+                       "Например: `+49 151 12345678`")
+
+    digits = cleaned.lstrip("+")
+    if len(digits) < 7:
+        return False, f"В номере всего {len(digits)} цифр — слишком мало."
+    if len(digits) > 15:
+        return False, (f"В номере {len(digits)} цифр. Международный стандарт — "
+                       "максимум 15. Проверь, нет ли лишних.")
+    return True, cleaned
+
+
+def v_email(text: str):
+    e = text.strip().lower()
+    if " " in e:
+        return False, "В адресе не должно быть пробелов."
+    if not re.fullmatch(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", e):
+        return False, ("Это не похоже на e-mail.\n"
+                       "Например: `name.nachname@gmail.com`")
+    return True, e
+
+
+def v_name(text: str):
+    n = " ".join(text.split())
+    if any(ch.isdigit() for ch in n):
+        return False, "В имени не должно быть цифр."
+    if len(n) < 3:
+        return False, "Слишком коротко. Напиши имя и фамилию."
+    if len(n) > 70:
+        return False, "Слишком длинно для имени."
+    if len(n.split()) < 2:
+        return False, "Нужны имя и фамилия, оба слова."
+    return True, n
+
+
+def v_start_date(text: str):
+    t = text.strip()
+    # Свободные формулировки допустимы
+    if not re.search(r"\d{4}", t):
+        return True, t
+
+    norm, _ = _clean_date(t)
+    if norm:
+        d = datetime.strptime(norm, "%d.%m.%Y").date()
+        if d < date.today():
+            return False, ("Эта дата уже прошла. Укажи будущую "
+                           "или напиши `sofort`.")
+        if d.year > date.today().year + 5:
+            return False, "Слишком далёкая дата. Проверь год."
+        return True, norm
+
+    year = int(re.search(r"\d{4}", t).group())
+    if year < date.today().year or year > date.today().year + 5:
+        return False, "Проверь год — он выглядит неправдоподобно."
+    return True, t
+
+
+VALIDATORS = {
+    NAME: v_name,
+    BIRTH_DATE: v_birth_date,
+    PHONE: v_phone,
+    EMAIL: v_email,
+    START_DATE: v_start_date,
+}
+
+
+def check_field(state: int, text: str):
+    """Проверяет ответ. Возвращает (ок, нормализованное значение или текст ошибки)."""
+    if text.strip().lower() in SKIP_WORDS:
+        return True, ""
+    validator = VALIDATORS.get(state)
+    if not validator:
+        return True, text.strip()
+    return validator(text)
+
+
+
 
 
 def purge_if_expired(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -328,7 +454,13 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     key = FIELD_MAP.get(current)
     if key:
-        context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+        ok, result = check_field(current, answer)
+        if not ok:
+            # Остаёмся на том же вопросе, пока ответ не станет корректным
+            await update.message.reply_text(f"⚠️ {result}", parse_mode="Markdown")
+            return current
+
+        context.user_data[key] = result
         # Запоминаем связь сообщение → поле, чтобы правка текста в Telegram
         # меняла именно тот ответ, а не сбивала диалог
         context.user_data.setdefault("msg_map", {})[update.message.message_id] = key
@@ -499,8 +631,13 @@ async def apply_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         key = FIELD_MAP.get(field_state)
         if key and update.message.text:
-            answer = update.message.text.strip()
-            context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+            ok, result = check_field(field_state, update.message.text)
+            if not ok:
+                await update.message.reply_text(
+                    f"⚠️ {result}\n\nПопробуй ещё раз:", parse_mode="Markdown")
+                return  # остаёмся в режиме правки этого же поля
+
+            context.user_data[key] = result
             context.user_data.setdefault("msg_map", {})[update.message.message_id] = key
 
     context.user_data.pop("editing_field", None)
@@ -790,7 +927,11 @@ async def neu_unternehmen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def neu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = update.message.text.strip().lstrip("✅").strip()
     if answer and answer.lower() not in SKIP_WORDS:
-        context.user_data["start_date"] = answer
+        ok, result = check_field(START_DATE, answer)
+        if not ok:
+            await update.message.reply_text(f"⚠️ {result}", parse_mode="Markdown")
+            return
+        context.user_data["start_date"] = result
 
     await generate_documents(update.message, context)
 
@@ -1144,9 +1285,18 @@ async def on_edited(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    answer = msg.text.strip()
-    context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+    state_of_key = next((st for st, k in FIELD_MAP.items() if k == key), None)
+    ok, result = check_field(state_of_key, msg.text)
     label = LABEL_BY_KEY.get(key, key)
+
+    if not ok:
+        await msg.reply_text(
+            f"⚠️ *{label}* — {result}\n\nСтарое значение оставил без изменений.",
+            parse_mode="Markdown")
+        return
+
+    context.user_data[key] = result
+    answer = result
 
     await msg.reply_text(
         f"✅ Обновил *{label}*: `{answer}`",
