@@ -3,6 +3,7 @@ import io
 import json
 import random
 import time
+from datetime import date
 import logging
 import asyncio
 from aiohttp import web
@@ -559,12 +560,48 @@ BERUFSERFAHRUNG:
 10. Pro Station 2–3 konkrete Tätigkeits-Stichpunkte, jeweils mit einem Substantiv oder Verb beginnend
     (z.B. "Betreuung von bis zu 40 Gästen pro Schicht"). Keine Floskeln, keine Selbstlob-Sätze.
 
-ANSCHREIBEN (4 Absätze, Sie-Form, sachlich):
-11. Absatz 1: konkreter Einstieg mit Bezug auf Beruf und Unternehmen.
-    NICHT mit "Hiermit bewerbe ich mich" beginnen.
-    Absatz 2: bisherige Erfahrung und was daraus konkret für DIESEN Beruf nützlich ist.
-    Absatz 3: Motivation, Sprachkenntnisse, passende persönliche Stärken.
-    Absatz 4: Verfügbarkeit und Bitte um ein Vorstellungsgespräch.
+ANSCHREIBEN — der wichtigste Teil. Sie-Form, sachlich, präzise.
+
+11. GESAMTLÄNGE: 280–360 Wörter, verteilt auf 4 Absätze.
+    Ein zu kurzes Anschreiben wirkt lieblos und wird aussortiert.
+    Richtwerte: Absatz 1 = 45–65 Wörter, Absatz 2 = 90–120 Wörter,
+    Absatz 3 = 80–110 Wörter, Absatz 4 = 35–55 Wörter.
+
+12. GRUNDPRINZIP: Beweis statt Behauptung.
+    Jede Eigenschaft muss durch eine konkrete Tatsache aus den Kandidatendaten
+    belegt werden. Niemals eine Eigenschaft nennen, ohne sie zu begründen.
+    FALSCH: "Ich bin belastbar und teamfähig."
+    RICHTIG: "Bei bis zu 40 Gästen pro Schicht habe ich gelernt, auch unter
+    Zeitdruck den Überblick zu behalten und mich eng mit der Küche abzustimmen."
+
+13. KONKRETHEIT: Verwende, wo vorhanden, echte Zahlen und Fakten aus den Daten —
+    Dauer der Tätigkeit, Menge, Arbeitgeber, Sprachniveau, Abschluss.
+    Nenne außerdem 2–3 typische Aufgaben des ANGESTREBTEN Berufs beim Namen
+    und stelle den Bezug zur bisherigen Erfahrung her.
+    Erfinde dabei keine Zahlen, die nicht ableitbar sind.
+
+14. VERBOTEN sind diese Floskeln und alle ähnlichen Formulierungen:
+    "Hiermit bewerbe ich mich", "Ich bin motiviert und lernbereit",
+    "Ihr Unternehmen ist sehr bekannt", "Ich bin ein Teamplayer",
+    "Ich bringe alle nötigen Voraussetzungen mit",
+    "Ich würde mich sehr über eine Rückmeldung freuen" als einziger Schlusssatz.
+
+15. AUFBAU DER ABSÄTZE:
+    Absatz 1 — Einstieg: Warum genau dieser Beruf und dieser Betrieb.
+      Beginne mit dem Interesse am Beruf oder mit einem Bezug zum Unternehmen,
+      nicht mit der eigenen Person. Nenne den Beruf ausdrücklich.
+    Absatz 2 — Erfahrung: Was der Kandidat bisher gemacht hat, mit Zahlen und
+      Aufgaben, und was davon für den Zielberuf unmittelbar nützlich ist.
+      Übertrage die Tätigkeiten in die Fachsprache des Zielberufs.
+    Absatz 3 — Person und Sprache: Motivation in eigenen Worten des Kandidaten,
+      Sprachkenntnisse mit Niveau, ein bis zwei belegte Stärken.
+      Bei Bewerbern aus dem Ausland: Bereitschaft zum Umzug erwähnen,
+      falls die Adresse nicht in Deutschland liegt.
+    Absatz 4 — Abschluss: Verfügbarkeit ab dem genannten Datum, Hinweis auf
+      beigefügte Unterlagen, aktive Bitte um ein persönliches Gespräch.
+
+16. BETREFF: aussagekräftig und vollständig, ohne das Wort "Betreff".
+    Muster: "Bewerbung um einen Ausbildungsplatz als [Beruf] ab [Datum]".
 
 JSON-STRUKTUR (genau einhalten):
 {{
@@ -591,7 +628,7 @@ JSON-STRUKTUR (genau einhalten):
   "interests": [{{"label": "Sport", "value": ""}}],
   "letter": {{
     "recipient": "Firmenname\\nStraße\\nPLZ Ort",
-    "city": "Wohnort des Kandidaten",
+    "city": "Wohnort des Kandidaten, gefolgt von ', {today}' — z.B. 'Leipzig, {today}'",
     "subject": "Bewerbung um einen Ausbildungsplatz als ...",
     "salutation": "Sehr geehrte Damen und Herren,",
     "paragraphs": ["", "", "", ""],
@@ -624,13 +661,16 @@ async def generate_documents(message, context: ContextTypes.DEFAULT_TYPE):
     )
 
     d = context.user_data
-    prompt = PROMPT_TEMPLATE.format(**{
+    fields = {
         k: (d.get(k) or "nicht angegeben") for k in [
             "name", "birth_date", "birth_place", "address", "phone",
             "email", "beruf", "unternehmen", "start_date", "schule", "weiterbildung",
             "erfahrung", "praktika", "sprachen", "fachkenntnisse",
             "interessen", "motivation"]
-    })
+    }
+    # Дату ставим сами — модель иначе выдумывает произвольную
+    fields["today"] = date.today().strftime("%d.%m.%Y")
+    prompt = PROMPT_TEMPLATE.format(**fields)
 
     try:
         response = await asyncio.to_thread(model.generate_content, prompt)
@@ -1027,31 +1067,47 @@ def build_pdf(data: dict, photo_bytes: bytes | None = None) -> io.BytesIO:
     if letter:
         story.append(PageBreak())
 
+        # Anschreiben обязан уместиться на одну страницу — это норма деловой
+        # переписки в Германии. Чем длиннее текст, тем плотнее интервалы.
+        words = sum(len(str(x).split()) for x in letter.get("paragraphs") or [])
+        if words > 320:
+            gap_top, gap_recip, gap_city, gap_sign = 14, 12, 12, 20
+            body = ParagraphStyle("letter_tight", parent=s["letter"],
+                                  leading=13.2, spaceAfter=6)
+        elif words > 250:
+            gap_top, gap_recip, gap_city, gap_sign = 18, 15, 14, 24
+            body = ParagraphStyle("letter_mid", parent=s["letter"],
+                                  leading=14, spaceAfter=7)
+        else:
+            gap_top, gap_recip, gap_city, gap_sign = 26, 20, 18, 30
+            body = s["letter"]
+
         story.append(Paragraph(f"<b>{p.get('name','')}</b>", s["letterline"]))
         for bit in (p.get("address"), p.get("phone"), p.get("email")):
             if bit:
                 story.append(Paragraph(bit, s["letterline"]))
-        story.append(Spacer(1, 26))
+        story.append(Spacer(1, gap_top))
 
         for line in str(letter.get("recipient", "")).split("\n"):
             if line.strip():
                 story.append(Paragraph(line.strip(), s["letterline"]))
-        story.append(Spacer(1, 20))
+        story.append(Spacer(1, gap_recip))
 
         if letter.get("city"):
             story.append(Paragraph(letter["city"], s["right"]))
-        story.append(Spacer(1, 18))
+        story.append(Spacer(1, gap_city))
 
         if letter.get("subject"):
             story.append(Paragraph(letter["subject"], s["subject"]))
         if letter.get("salutation"):
-            story.append(Paragraph(letter["salutation"], s["letter"]))
+            story.append(Paragraph(letter["salutation"], body))
         for para in letter.get("paragraphs") or []:
-            story.append(Paragraph(para, s["letter"]))
+            story.append(Paragraph(para, body))
 
-        story.append(Spacer(1, 8))
-        story.append(Paragraph(letter.get("closing", "Mit freundlichen Grüßen"), s["letterline"]))
-        story.append(Spacer(1, 30))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(letter.get("closing", "Mit freundlichen Grüßen"),
+                               s["letterline"]))
+        story.append(Spacer(1, gap_sign))
         story.append(Paragraph(p.get("name", ""), s["letterline"]))
 
     doc.build(story)
