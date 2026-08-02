@@ -214,6 +214,9 @@ FIELD_MAP = {
 
 SKIP_WORDS = ["пропустить", "нет", "skip", "-", "keine", "нету"]
 
+# Подпись поля по его ключу — нужна, когда правится отправленное сообщение
+LABEL_BY_KEY = {key: EDIT_LABELS.get(st, key) for st, key in FIELD_MAP.items()}
+
 
 # ================= ДИАЛОГ =================
 
@@ -325,6 +328,9 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = FIELD_MAP.get(current)
     if key:
         context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+        # Запоминаем связь сообщение → поле, чтобы правка текста в Telegram
+        # меняла именно тот ответ, а не сбивала диалог
+        context.user_data.setdefault("msg_map", {})[update.message.message_id] = key
 
     nxt = current + 1
     question = question_text(nxt)
@@ -353,7 +359,7 @@ async def collect_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Photo error: {e}")
             await update.message.reply_text("⚠️ Фото не удалось загрузить, продолжаем без него.")
-    return await show_summary(update, context)
+    return await show_summary(update.message, context)
 
 
 def summary_text(d: dict) -> str:
@@ -402,9 +408,9 @@ def edit_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_summary(message, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["state"] = CONFIRM
-    await update.message.reply_text(
+    await message.reply_text(
         summary_text(context.user_data),
         parse_mode="Markdown",
         reply_markup=summary_keyboard()
@@ -494,10 +500,11 @@ async def apply_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if key and update.message.text:
             answer = update.message.text.strip()
             context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+            context.user_data.setdefault("msg_map", {})[update.message.message_id] = key
 
     context.user_data.pop("editing_field", None)
     await update.message.reply_text("✅ Исправлено.")
-    return await show_summary(update, context)
+    return await show_summary(update.message, context)
 
 
 # ================= ГЕНЕРАЦИЯ =================
@@ -1058,8 +1065,48 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=ReplyKeyboardRemove())
 
 
+
+async def on_edited(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь исправил уже отправленное сообщение.
+
+    Telegram присылает это отдельным событием, где update.message пустой.
+    Раньше бот на этом падал и предлагал начать заново. Теперь находим,
+    на какой вопрос отвечало это сообщение, и обновляем именно то поле.
+    """
+    msg = update.edited_message
+    if not msg or not msg.text:
+        return
+
+    key = (context.user_data.get("msg_map") or {}).get(msg.message_id)
+
+    if not key:
+        # Сообщение не из текущей анкеты — например, правка очень старого текста
+        await msg.reply_text(
+            "Это сообщение не относится к текущей анкете.\n\n"
+            "Чтобы что-то исправить, дойди до сводки и нажми *«✏️ Исправить»*.",
+            parse_mode="Markdown"
+        )
+        return
+
+    answer = msg.text.strip()
+    context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+    label = LABEL_BY_KEY.get(key, key)
+
+    await msg.reply_text(
+        f"✅ Обновил *{label}*: `{answer}`",
+        parse_mode="Markdown"
+    )
+
+    # Если человек уже на сводке — сразу показываем её обновлённой
+    if context.user_data.get("state") == CONFIRM:
+        await show_summary(msg, context)
+
+
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Единая точка входа. Состояние живёт только в user_data — рассинхрону взяться неоткуда."""
+    if not update.message:
+        return
+
     state = context.user_data.get("state")
 
     if state is None:
@@ -1145,8 +1192,14 @@ async def main():
     app.add_handler(CommandHandler("loeschen", loeschen))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(on_button))
+
+    # Правка отправленного сообщения — отдельное событие, ловим до основного роутера
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, router))
+        filters.UpdateType.EDITED_MESSAGE & filters.TEXT, on_edited))
+
+    app.add_handler(MessageHandler(
+        filters.UpdateType.MESSAGE & (filters.TEXT | filters.PHOTO)
+        & ~filters.COMMAND, router))
     app.add_error_handler(on_error)
 
     await app.initialize()
