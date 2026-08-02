@@ -46,6 +46,18 @@ DARK = colors.HexColor("#222222")     # основной текст
  SPRACHEN, FACHKENNTNISSE, INTERESSEN, MOTIVATION,
  PHOTO, CONFIRM) = range(19)
 
+# Состояния повторной заявки. Нумерация с 100, чтобы не попасть
+# в диапазон обычного опроса — там состояние наращивается на +1.
+NEU_BERUF, NEU_UNTERNEHMEN, NEU_START = 100, 101, 102
+
+# Поля, из которых собирается сохранённый профиль кандидата
+PROFILE_FIELDS = [
+    "name", "birth_date", "birth_place", "address", "phone", "email",
+    "beruf", "unternehmen", "start_date", "schule", "weiterbildung",
+    "erfahrung", "praktika", "sprachen", "fachkenntnisse",
+    "interessen", "motivation",
+]
+
 SKIP = "\n\n_Нечего указать — напиши_ *пропустить*"
 
 # Шаблоны вопросов. {ex} подставляется случайно, чтобы примеры не приедались.
@@ -173,6 +185,34 @@ SKIP_WORDS = ["пропустить", "нет", "skip", "-", "keine", "нету"
 
 # ================= ДИАЛОГ =================
 
+
+def save_profile(context: ContextTypes.DEFAULT_TYPE):
+    """Запоминает ответы кандидата, чтобы следующая заявка заняла полминуты."""
+    d = context.user_data
+    profile = {k: d.get(k, "") for k in PROFILE_FIELDS}
+    if d.get("photo"):
+        profile["photo"] = d["photo"]
+    d["profile"] = profile
+
+
+def load_profile(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Разворачивает сохранённый профиль обратно в рабочие поля."""
+    profile = context.user_data.get("profile")
+    if not profile:
+        return False
+    for k, v in profile.items():
+        context.user_data[k] = v
+    return True
+
+
+def reset_session(context: ContextTypes.DEFAULT_TYPE):
+    """Чистит текущий диалог, но сохранённый профиль не трогает."""
+    profile = context.user_data.get("profile")
+    context.user_data.clear()
+    if profile:
+        context.user_data["profile"] = profile
+
+
 async def ask(update: Update, text: str):
     """Отправляет вопрос. Если Telegram не принял Markdown — шлём обычным текстом."""
     try:
@@ -197,13 +237,15 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
+    reset_session(context)
     context.user_data["state"] = NAME
     await update.message.reply_text(
         "🇩🇪 *Ausbildung Agent*\n\n"
         "Составлю профессиональный немецкий Lebenslauf и Anschreiben.\n\n"
         "Будет 17 вопросов — часть можно пропустить. "
         "Чем подробнее ответишь, тем сильнее получатся документы.\n\n"
+        "_Заполняешь один раз. Дальше заявка в любую другую фирму — "
+        "команда_ */neu* _и полминуты._\n\n"
         "Поехали 👇",
         parse_mode="Markdown"
     )
@@ -228,7 +270,7 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️ Внутренний сбой на этом шаге. Напиши /start, чтобы начать заново."
         )
-        context.user_data.clear()
+        reset_session(context)
         return
 
     context.user_data["state"] = nxt
@@ -393,6 +435,11 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "заново" in update.message.text.lower():
         return await start(update, context)
 
+    await generate_documents(update, context)
+
+
+async def generate_documents(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Собирает документы из текущих данных и сохраняет профиль на будущее."""
     await update.message.reply_text(
         "⏳ Генерирую документы... ~25 секунд.",
         reply_markup=ReplyKeyboardRemove()
@@ -420,22 +467,146 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         pdf_buf = build_pdf(data, d.get("photo"))
         name_clean = (d.get("name") or "Kandidat").replace(" ", "_")
+        firma = (d.get("unternehmen") or "").split(",")[0].strip().replace(" ", "_")
+        filename = f"Bewerbung_{name_clean}"
+        if firma:
+            filename += f"_{firma}"
+
+        # Профиль сохраняем только после успешной генерации
+        save_profile(context)
 
         await update.message.reply_document(
             document=pdf_buf,
-            filename=f"Bewerbung_{name_clean}.pdf",
+            filename=f"{filename}.pdf",
             caption=(
                 f"✅ *Bewerbungsunterlagen für {d.get('name','')}*\n\n"
-                f"📄 Lebenslauf + Anschreiben — *{d.get('beruf','')}*\n\n"
-                "Viel Erfolg! 🍀\n\nНовое резюме: /start"
+                f"📄 {d.get('beruf','')}"
+                + (f" — {d.get('unternehmen')}" if d.get("unternehmen") else "")
+                + "\n\nViel Erfolg! 🍀\n\n"
+                "━━━━━━━━━━━━━━\n"
+                "📌 Данные сохранены.\n"
+                "*/neu* — заявка в другую фирму за 30 секунд\n"
+                "*/profil* — посмотреть сохранённое\n"
+                "*/start* — заполнить всё заново"
             ),
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nПопробуй снова: /start")
+        logger.error(f"Ошибка генерации: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Ошибка: {str(e)}\n\nПопробуй снова: /start"
+        )
 
+    reset_session(context)
+
+
+# ================= ПОВТОРНАЯ ЗАЯВКА =================
+
+async def neu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Новая заявка на основе сохранённого профиля — без 17 вопросов."""
+    if not context.user_data.get("profile"):
+        await update.message.reply_text(
+            "У меня пока нет твоих данных.\n\n"
+            "Заполни анкету один раз через /start — дальше каждая "
+            "следующая заявка будет занимать полминуты."
+        )
+        return
+
+    reset_session(context)
+    load_profile(context)
+    context.user_data["state"] = NEU_BERUF
+
+    beruf = context.user_data.get("beruf", "")
+    keyboard = [[f"✅ {beruf}"]] if beruf else None
+    await update.message.reply_text(
+        "🔁 *Новая заявка*\n\n"
+        "Личные данные, опыт и образование я помню.\n"
+        "Нужно только уточнить, куда подаёшься.\n\n"
+        "💼 *Профессия*\n\n"
+        + (f"Прошлый раз было: `{beruf}`\nНажми кнопку, чтобы оставить, или напиши другую."
+           if beruf else "Напиши название профессии по-немецки."),
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True,
+                                         one_time_keyboard=True) if keyboard else None
+    )
+
+
+async def neu_beruf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answer = update.message.text.strip().lstrip("✅").strip()
+    if answer:
+        context.user_data["beruf"] = answer
+
+    context.user_data["state"] = NEU_UNTERNEHMEN
+    await update.message.reply_text(
+        "🏢 *Куда подаёшься?*\n\n"
+        "Название фирмы и город.\n"
+        f"Например: {random.choice(EXAMPLES[UNTERNEHMEN])}",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def neu_unternehmen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answer = update.message.text.strip()
+    context.user_data["unternehmen"] = "" if answer.lower() in SKIP_WORDS else answer
+
+    context.user_data["state"] = NEU_START
+    alt = context.user_data.get("start_date") or "nach Absprache"
+    await update.message.reply_text(
+        "🗓 *Когда можешь начать?*\n\n"
+        f"Прошлый раз: `{alt}`\n"
+        "Нажми кнопку, чтобы оставить, или напиши другую дату.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([[f"✅ {alt}"]], resize_keyboard=True,
+                                         one_time_keyboard=True)
+    )
+
+
+async def neu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answer = update.message.text.strip().lstrip("✅").strip()
+    if answer and answer.lower() not in SKIP_WORDS:
+        context.user_data["start_date"] = answer
+
+    await generate_documents(update, context)
+
+
+async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает, что бот помнит о кандидате."""
+    profile = context.user_data.get("profile")
+    if not profile:
+        await update.message.reply_text(
+            "Пока ничего не сохранено. Пройди анкету через /start."
+        )
+        return
+
+    def v(k, default="—"):
+        return profile.get(k) or default
+
+    await update.message.reply_text(
+        "📇 *Сохранённые данные*\n\n"
+        f"👤 {v('name')}\n"
+        f"📅 {v('birth_date')} · {v('birth_place')}\n"
+        f"🏠 {v('address')}\n"
+        f"📞 {v('phone')} · 📧 {v('email')}\n\n"
+        f"🎓 {v('schule')}\n"
+        f"💪 {v('erfahrung', 'нет')}\n"
+        f"🌍 {v('sprachen')}\n"
+        f"📸 {'фото есть' if profile.get('photo') else 'без фото'}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "*/neu* — заявка в новую фирму\n"
+        "*/start* — перезаполнить анкету\n"
+        "*/loeschen* — удалить данные",
+        parse_mode="Markdown"
+    )
+
+
+async def loeschen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Полное удаление сохранённых данных."""
     context.user_data.clear()
+    await update.message.reply_text(
+        "🗑 Все сохранённые данные удалены.\n\n/start — начать заново.",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 
 # ================= ВЁРСТКА PDF =================
@@ -670,7 +841,7 @@ def build_pdf(data: dict, photo_bytes: bytes | None = None) -> io.BytesIO:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
+    reset_session(context)
     await update.message.reply_text("Отменено. /start — начать заново.",
                                     reply_markup=ReplyKeyboardRemove())
 
@@ -680,10 +851,27 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = context.user_data.get("state")
 
     if state is None:
-        await update.message.reply_text(
-            "Диалог не начат или сессия сброшена.\n\nНапиши /start, чтобы создать документы."
-        )
+        if context.user_data.get("profile"):
+            await update.message.reply_text(
+                "Диалог не активен.\n\n"
+                "*/neu* — быстрая заявка по сохранённым данным\n"
+                "*/profil* — что я помню\n"
+                "*/start* — заполнить анкету заново",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "Диалог не начат.\n\nНапиши /start, чтобы создать документы."
+            )
         return
+
+    # Быстрая заявка по сохранённому профилю
+    if state == NEU_BERUF:
+        return await neu_beruf(update, context)
+    if state == NEU_UNTERNEHMEN:
+        return await neu_unternehmen(update, context)
+    if state == NEU_START:
+        return await neu_start(update, context)
 
     if state == PHOTO:
         return await collect_photo(update, context)
@@ -735,12 +923,22 @@ async def main():
            .build())
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("neu", neu))
+    app.add_handler(CommandHandler("profil", profil))
+    app.add_handler(CommandHandler("loeschen", loeschen))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, router))
     app.add_error_handler(on_error)
 
     await app.initialize()
+    await app.bot.set_my_commands([
+        ("start", "Заполнить анкету с нуля"),
+        ("neu", "Заявка в новую фирму (30 секунд)"),
+        ("profil", "Мои сохранённые данные"),
+        ("loeschen", "Удалить мои данные"),
+        ("cancel", "Прервать диалог"),
+    ])
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logger.info("Бот запущен и слушает сообщения")
