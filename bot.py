@@ -2,12 +2,16 @@ import os
 import io
 import json
 import random
+import time
 import logging
 import asyncio
 from aiohttp import web
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import (
+    Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, PicklePersistence
 )
 import google.generativeai as genai
@@ -49,6 +53,34 @@ DARK = colors.HexColor("#222222")     # основной текст
 # Состояния повторной заявки. Нумерация с 100, чтобы не попасть
 # в диапазон обычного опроса — там состояние наращивается на +1.
 NEU_BERUF, NEU_UNTERNEHMEN, NEU_START = 100, 101, 102
+
+# Состояние точечной правки одного поля со сводки
+EDITING = 200
+
+# Данные кандидата хранятся ограниченное время — требование DSGVO
+DATA_RETENTION_DAYS = 30
+
+# Короткие подписи для меню правки
+EDIT_LABELS = {
+    NAME: "👤 Имя",
+    BIRTH_DATE: "📅 Дата рожд.",
+    BIRTH_PLACE: "📍 Место рожд.",
+    ADDRESS: "🏠 Адрес",
+    PHONE: "📞 Телефон",
+    EMAIL: "📧 E-Mail",
+    BERUF: "💼 Профессия",
+    UNTERNEHMEN: "🏢 Фирма",
+    START_DATE: "🗓 Начало",
+    SCHULE: "🎓 Школа",
+    WEITERBILDUNG: "📜 Курсы",
+    ERFAHRUNG: "💪 Опыт",
+    PRAKTIKA: "🔧 Практика",
+    SPRACHEN: "🌍 Языки",
+    FACHKENNTNISSE: "🛠 Навыки",
+    INTERESSEN: "🎯 Интересы",
+    MOTIVATION: "🔥 Мотивация",
+    PHOTO: "📸 Фото",
+}
 
 # Поля, из которых собирается сохранённый профиль кандидата
 PROFILE_FIELDS = [
@@ -186,12 +218,37 @@ SKIP_WORDS = ["пропустить", "нет", "skip", "-", "keine", "нету"
 # ================= ДИАЛОГ =================
 
 
+
+def purge_if_expired(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Удаляет профиль, если он пролежал дольше срока хранения."""
+    profile = context.user_data.get("profile")
+    if not profile:
+        return False
+    saved_at = profile.get("saved_at")
+    if not saved_at:
+        return False
+    if time.time() - saved_at > DATA_RETENTION_DAYS * 86400:
+        context.user_data.clear()
+        logger.info("Профиль удалён по истечении срока хранения")
+        return True
+    return False
+
+
+def days_left(context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    profile = context.user_data.get("profile")
+    if not profile or not profile.get("saved_at"):
+        return None
+    elapsed = (time.time() - profile["saved_at"]) / 86400
+    return max(0, int(DATA_RETENTION_DAYS - elapsed))
+
+
 def save_profile(context: ContextTypes.DEFAULT_TYPE):
     """Запоминает ответы кандидата, чтобы следующая заявка заняла полминуты."""
     d = context.user_data
     profile = {k: d.get(k, "") for k in PROFILE_FIELDS}
     if d.get("photo"):
         profile["photo"] = d["photo"]
+    profile["saved_at"] = time.time()
     d["profile"] = profile
 
 
@@ -201,7 +258,8 @@ def load_profile(context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not profile:
         return False
     for k, v in profile.items():
-        context.user_data[k] = v
+        if k != "saved_at":
+            context.user_data[k] = v
     return True
 
 
@@ -213,14 +271,18 @@ def reset_session(context: ContextTypes.DEFAULT_TYPE):
         context.user_data["profile"] = profile
 
 
-async def ask(update: Update, text: str):
-    """Отправляет вопрос. Если Telegram не принял Markdown — шлём обычным текстом."""
+async def ask(message, text: str):
+    """Отправляет вопрос. Принимает message, чтобы работать и из кнопок тоже.
+
+    Если Telegram не принял Markdown — шлём обычным текстом, иначе бот
+    молча замолкает на середине диалога.
+    """
     try:
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await message.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.warning(f"Markdown отклонён, отправляю без разметки: {e}")
         plain = text.replace("*", "").replace("`", "").replace("_", "")
-        await update.message.reply_text(plain)
+        await message.reply_text(plain)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -237,6 +299,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    purge_if_expired(context)
     reset_session(context)
     context.user_data["state"] = NAME
     await update.message.reply_text(
@@ -246,10 +309,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Чем подробнее ответишь, тем сильнее получатся документы.\n\n"
         "_Заполняешь один раз. Дальше заявка в любую другую фирму — "
         "команда_ */neu* _и полминуты._\n\n"
+        f"🔒 _Данные хранятся {DATA_RETENTION_DAYS} дней, потом удаляются. "
+        "Подробнее —_ */datenschutz*\n\n"
         "Поехали 👇",
         parse_mode="Markdown"
     )
-    await ask(update, question_text(NAME))
+    await ask(update.message, question_text(NAME))
     return NAME
 
 
@@ -274,7 +339,7 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["state"] = nxt
-    await ask(update, question)
+    await ask(update.message, question)
     return nxt
 
 
@@ -291,13 +356,11 @@ async def collect_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_summary(update, context)
 
 
-async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    d = context.user_data
-
+def summary_text(d: dict) -> str:
     def val(k, default="—"):
         return d.get(k) or default
 
-    summary = (
+    return (
         "✅ *Проверь данные:*\n\n"
         f"👤 {val('name')}\n"
         f"📅 {val('birth_date')} · {val('birth_place')}\n"
@@ -314,16 +377,127 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🛠 {val('fachkenntnisse', 'нет')}\n"
         f"🎯 {val('interessen', 'нет')}\n"
         f"🔥 {val('motivation', 'нет')}\n"
-        f"📸 {'фото есть' if d.get('photo') else 'без фото'}\n\n"
-        "Создаём PDF?"
+        f"📸 {'фото есть' if d.get('photo') else 'без фото'}"
     )
-    keyboard = [["✅ Да, создать PDF!", "🔄 Начать заново"]]
-    await update.message.reply_text(
-        summary, parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+
+
+def summary_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Создать PDF", callback_data="gen")],
+        [InlineKeyboardButton("✏️ Исправить", callback_data="editmenu")],
+        [InlineKeyboardButton("🔄 Заполнить заново", callback_data="restart")],
+    ])
+
+
+def edit_menu_keyboard() -> InlineKeyboardMarkup:
+    """Поля в два столбца, чтобы влезли на экран телефона."""
+    items = list(EDIT_LABELS.items())
+    rows, i = [], 0
+    while i < len(items):
+        pair = items[i:i + 2]
+        rows.append([InlineKeyboardButton(lbl, callback_data=f"edit:{st}")
+                     for st, lbl in pair])
+        i += 2
+    rows.append([InlineKeyboardButton("⬅️ Назад к сводке", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["state"] = CONFIRM
+    await update.message.reply_text(
+        summary_text(context.user_data),
+        parse_mode="Markdown",
+        reply_markup=summary_keyboard()
+    )
     return CONFIRM
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки под сводкой."""
+    query = update.callback_query
+    await query.answer()
+    action = query.data
+
+    if action == "del_yes":
+        context.user_data.clear()
+        await query.edit_message_text(
+            "🗑 Все данные удалены.\n\n/start — начать заново."
+        )
+        return
+
+    if action == "del_no":
+        await query.edit_message_text("Отменено, данные на месте.")
+        return
+
+    if action == "editmenu":
+        await query.edit_message_text(
+            "✏️ *Что исправить?*",
+            parse_mode="Markdown",
+            reply_markup=edit_menu_keyboard()
+        )
+        return
+
+    if action == "back":
+        await query.edit_message_text(
+            summary_text(context.user_data),
+            parse_mode="Markdown",
+            reply_markup=summary_keyboard()
+        )
+        context.user_data["state"] = CONFIRM
+        return
+
+    if action == "restart":
+        await query.edit_message_text("Начинаем заново.")
+        reset_session(context)
+        context.user_data["state"] = NAME
+        await ask(query.message, question_text(NAME))
+        return
+
+    if action.startswith("edit:"):
+        field_state = int(action.split(":")[1])
+        context.user_data["state"] = EDITING
+        context.user_data["editing_field"] = field_state
+
+        label = EDIT_LABELS.get(field_state, "поле")
+        current = context.user_data.get(FIELD_MAP.get(field_state, ""), "")
+        note = f"\n\nСейчас: `{current}`" if current else ""
+
+        await query.edit_message_text(
+            f"✏️ *{label}*{note}\n\nНапиши новое значение:",
+            parse_mode="Markdown"
+        )
+        return
+
+    if action == "gen":
+        await query.edit_message_text(summary_text(context.user_data),
+                                      parse_mode="Markdown")
+        await generate_documents(query.message, context)
+        return
+
+
+async def apply_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохраняет исправленное значение и возвращает к сводке."""
+    field_state = context.user_data.get("editing_field")
+
+    if field_state == PHOTO:
+        if update.message.photo:
+            try:
+                tg_file = await update.message.photo[-1].get_file()
+                context.user_data["photo"] = bytes(await tg_file.download_as_bytearray())
+            except Exception as e:
+                logger.error(f"Ошибка фото: {e}")
+                await update.message.reply_text("⚠️ Фото не загрузилось.")
+        elif update.message.text and update.message.text.lower() in SKIP_WORDS:
+            context.user_data.pop("photo", None)
+    else:
+        key = FIELD_MAP.get(field_state)
+        if key and update.message.text:
+            answer = update.message.text.strip()
+            context.user_data[key] = "" if answer.lower() in SKIP_WORDS else answer
+
+    context.user_data.pop("editing_field", None)
+    await update.message.reply_text("✅ Исправлено.")
+    return await show_summary(update, context)
 
 
 # ================= ГЕНЕРАЦИЯ =================
@@ -431,16 +605,13 @@ def parse_json_response(text: str) -> dict:
     return json.loads(t[start:end + 1])
 
 
-async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "заново" in update.message.text.lower():
-        return await start(update, context)
+async def generate_documents(message, context: ContextTypes.DEFAULT_TYPE):
+    """Собирает документы из текущих данных и сохраняет профиль на будущее.
 
-    await generate_documents(update, context)
-
-
-async def generate_documents(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Собирает документы из текущих данных и сохраняет профиль на будущее."""
-    await update.message.reply_text(
+    Принимает message, а не update: вызывается и из обычного сообщения,
+    и из нажатия инлайн-кнопки.
+    """
+    await message.reply_text(
         "⏳ Генерирую документы... ~25 секунд.",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -475,7 +646,7 @@ async def generate_documents(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Профиль сохраняем только после успешной генерации
         save_profile(context)
 
-        await update.message.reply_document(
+        await message.reply_document(
             document=pdf_buf,
             filename=f"{filename}.pdf",
             caption=(
@@ -493,7 +664,7 @@ async def generate_documents(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as e:
         logger.error(f"Ошибка генерации: {e}", exc_info=True)
-        await update.message.reply_text(
+        await message.reply_text(
             f"❌ Ошибка: {str(e)}\n\nПопробуй снова: /start"
         )
 
@@ -504,6 +675,13 @@ async def generate_documents(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def neu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Новая заявка на основе сохранённого профиля — без 17 вопросов."""
+    if purge_if_expired(context):
+        await update.message.reply_text(
+            f"Данные хранились {DATA_RETENTION_DAYS} дней и были удалены "
+            "автоматически.\n\nЗаполни анкету заново: /start"
+        )
+        return
+
     if not context.user_data.get("profile"):
         await update.message.reply_text(
             "У меня пока нет твоих данных.\n\n"
@@ -567,7 +745,7 @@ async def neu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if answer and answer.lower() not in SKIP_WORDS:
         context.user_data["start_date"] = answer
 
-    await generate_documents(update, context)
+    await generate_documents(update.message, context)
 
 
 async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -592,6 +770,7 @@ async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💪 {v('erfahrung', 'нет')}\n"
         f"🌍 {v('sprachen')}\n"
         f"📸 {'фото есть' if profile.get('photo') else 'без фото'}\n\n"
+        f"🔒 Хранятся ещё {days_left(context)} дн.\n\n"
         "━━━━━━━━━━━━━━\n"
         "*/neu* — заявка в новую фирму\n"
         "*/start* — перезаполнить анкету\n"
@@ -600,12 +779,45 @@ async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def loeschen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Полное удаление сохранённых данных."""
-    context.user_data.clear()
+
+async def datenschutz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация об обработке персональных данных (DSGVO)."""
+    left = days_left(context)
+    status = (f"\n\n📌 Твои данные сохранены, будут удалены через *{left} дн.*"
+              if left is not None else "")
+
     await update.message.reply_text(
-        "🗑 Все сохранённые данные удалены.\n\n/start — начать заново.",
-        reply_markup=ReplyKeyboardRemove()
+        "🔒 *Обработка персональных данных*\n\n"
+        "*Что собирается:* имя, дата и место рождения, адрес, телефон, "
+        "e-mail, сведения об образовании и опыте, фото — то, что ты вводишь сам.\n\n"
+        "*Зачем:* только для составления твоего Lebenslauf и Anschreiben.\n\n"
+        "*Кому передаётся:* текст анкеты уходит в Google Gemini для генерации "
+        "документов. Фото никуда не передаётся — оно вставляется в PDF локально.\n\n"
+        f"*Сколько хранится:* {DATA_RETENTION_DAYS} дней с последней заявки, "
+        "затем удаляется автоматически.\n\n"
+        "*Твои права:* можешь в любой момент посмотреть данные (*/profil*) "
+        "или удалить их полностью (*/loeschen*). Удаление необратимо и "
+        "происходит сразу."
+        + status,
+        parse_mode="Markdown"
+    )
+
+
+async def loeschen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление данных — с подтверждением, потому что откатить нельзя."""
+    if not context.user_data:
+        await update.message.reply_text("Нечего удалять — сохранённых данных нет.")
+        return
+
+    await update.message.reply_text(
+        "🗑 *Удалить все данные?*\n\n"
+        "Будут стёрты анкета, фото и сохранённый профиль. "
+        "Восстановить не получится.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Да, удалить", callback_data="del_yes"),
+            InlineKeyboardButton("Отмена", callback_data="del_no"),
+        ]])
     )
 
 
@@ -865,6 +1077,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    if state == EDITING:
+        return await apply_edit(update, context)
+
     # Быстрая заявка по сохранённому профилю
     if state == NEU_BERUF:
         return await neu_beruf(update, context)
@@ -876,13 +1091,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == PHOTO:
         return await collect_photo(update, context)
     if state == CONFIRM:
-        if not update.message.text:
-            await update.message.reply_text("Нажми кнопку внизу: создать PDF или начать заново.")
-            return
-        return await confirm(update, context)
+        await update.message.reply_text(
+            "Воспользуйся кнопками под сводкой выше 👆",
+            reply_markup=summary_keyboard()
+        )
+        return
 
     if not update.message.text:
-        await ask(update, question_text(state))
+        await ask(update.message, question_text(state))
         return
     return await collect(update, context)
 
@@ -925,8 +1141,10 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("neu", neu))
     app.add_handler(CommandHandler("profil", profil))
+    app.add_handler(CommandHandler("datenschutz", datenschutz))
     app.add_handler(CommandHandler("loeschen", loeschen))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, router))
     app.add_error_handler(on_error)
@@ -936,6 +1154,7 @@ async def main():
         ("start", "Заполнить анкету с нуля"),
         ("neu", "Заявка в новую фирму (30 секунд)"),
         ("profil", "Мои сохранённые данные"),
+        ("datenschutz", "Как обрабатываются данные"),
         ("loeschen", "Удалить мои данные"),
         ("cancel", "Прервать диалог"),
     ])
