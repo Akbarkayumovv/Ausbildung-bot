@@ -24,6 +24,8 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_JUSTIFY, TA_RIGHT
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
     HRFlowable, PageBreak, Image, KeepTogether
@@ -38,6 +40,30 @@ PORT = int(os.environ.get("PORT", 10000))
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"))
+
+
+# ---------- Шрифты ----------
+# Helvetica не содержит кириллицы: любая русская буква превращается в чёрный
+# квадрат. Документ должен быть полностью немецким, но если что-то всё же
+# просочится, лучше показать текст, чем квадраты.
+FONT_REGULAR, FONT_BOLD = "Helvetica", "Helvetica-Bold"
+
+for _dir in ("/usr/share/fonts/truetype/dejavu",
+             "/usr/share/fonts/dejavu",
+             "/usr/share/fonts/TTF"):
+    _reg, _bold = f"{_dir}/DejaVuSans.ttf", f"{_dir}/DejaVuSans-Bold.ttf"
+    if os.path.exists(_reg) and os.path.exists(_bold):
+        try:
+            pdfmetrics.registerFont(TTFont("DejaVu", _reg))
+            pdfmetrics.registerFont(TTFont("DejaVu-Bold", _bold))
+            FONT_REGULAR, FONT_BOLD = "DejaVu", "DejaVu-Bold"
+            logger.info("Шрифт DejaVu подключён — кириллица отображается корректно")
+        except Exception as e:
+            logger.warning(f"Не удалось подключить DejaVu: {e}")
+        break
+else:
+    logger.warning("DejaVu не найден, используется Helvetica без кириллицы")
+
 
 # ---------- Палитра как в классическом немецком образце ----------
 BAR = colors.HexColor("#C3D0E0")      # голубая полоса секции
@@ -671,8 +697,14 @@ KANDIDATENDATEN (Rohangaben, teils auf Russisch):
 
 GRUNDREGELN:
 1. Antworte AUSSCHLIESSLICH mit gültigem JSON. Kein Markdown, keine ```-Blöcke, kein Text davor oder danach.
-2. Alles auf Deutsch. Russische Eingaben sinngemäß übertragen, nicht wörtlich übersetzen.
-3. NIEMALS Platzhalter wie [Datum einfügen] oder [Name der Schule]. Fehlt eine Angabe, lasse den Eintrag weg.
+2. AUSGABESPRACHE: ausschließlich Deutsch, ausschließlich lateinische Schrift.
+   Der Text darf KEIN einziges kyrillisches Zeichen enthalten — auch nicht in
+   Klammern, Anführungszeichen oder als Erläuterung. Gib die Originalworte des
+   Kandidaten niemals wieder, weder im Original noch als Zitat in Klammern.
+3. NIEMALS Platzhalter. Verboten sind eckige Klammern jeder Art, etwa
+   [Datum einfügen], [Straße der Personalabteilung], [Name der Schule].
+   Fehlt eine Angabe, lasse die Zeile oder den Eintrag ersatzlos weg.
+   Ein unvollständiger Empfängerblock ist besser als eine erfundene Adresse.
 4. Erfinde keine Arbeitgeber, Schulen, Zeiträume, Zertifikate oder Noten, die nicht in den Daten stehen.
 5. Zeiträume im Format "2022 – 2024", "seit 2024", "03/2025".
 
@@ -696,6 +728,34 @@ BERUFSSPEZIFISCHE ANPASSUNG (wichtigster Punkt):
 BERUFSERFAHRUNG:
 10. Pro Station 2–3 konkrete Tätigkeits-Stichpunkte, jeweils mit einem Substantiv oder Verb beginnend
     (z.B. "Betreuung von bis zu 40 Gästen pro Schicht"). Keine Floskeln, keine Selbstlob-Sätze.
+
+UMGANG MIT DER MOTIVATION DES KANDIDATEN:
+Die Angabe zur Motivation ist eine Rohnotiz, oft knapp, umgangssprachlich und
+auf Russisch. Sie ist ein Hinweis auf das Interesse des Kandidaten — kein Text,
+der ins Anschreiben übernommen wird.
+
+a) Übersetze diese Notiz NIEMALS wörtlich und zitiere sie NIEMALS.
+   Formuliere stattdessen eine sachliche, berufsbezogene Begründung, die zu
+   dem erkennbaren Interesse passt.
+b) Ist die Notiz naiv, sehr kurz oder unpassend für eine Bewerbung, dann
+   verwende sie nur als Richtung und leite die eigentliche Begründung aus dem
+   Zielberuf und dem Werdegang des Kandidaten ab.
+c) Begründe immer über den Beruf: welche Aufgaben ihn ausmachen, welche
+   Anforderungen er stellt und warum diese zum Kandidaten passen.
+
+BEISPIEL — Rohnotiz "потому что нравятся поезда" für den Beruf Lokführer:
+FALSCH: Meine Motivation ist einfach: "weil ich Züge mag".
+FALSCH: Ich interessiere mich für Züge und möchte deshalb Lokführer werden.
+RICHTIG: Der Beruf des Lokführers verbindet technisches Verständnis mit hoher
+Verantwortung für Fahrgäste und einen pünktlichen Betrieb. Gerade diese
+Verbindung aus Technik und Verantwortung hat mein Interesse an der Eisenbahn
+von Anfang an geprägt.
+
+BEISPIEL — Rohnotiz "нравится помогать людям" für den Beruf Pflegefachmann:
+FALSCH: Ich helfe gerne Menschen.
+RICHTIG: Die Pflege verlangt neben fachlichem Wissen vor allem Zuverlässigkeit
+im Umgang mit Menschen, die auf Unterstützung angewiesen sind. Diese
+Verantwortung übernehme ich bewusst und mit der nötigen Sorgfalt.
 
 ANSCHREIBEN — der wichtigste Teil. Sie-Form, sachlich, präzise.
 
@@ -730,7 +790,8 @@ ANSCHREIBEN — der wichtigste Teil. Sie-Form, sachlich, präzise.
     Absatz 2 — Erfahrung: Was der Kandidat bisher gemacht hat, mit Zahlen und
       Aufgaben, und was davon für den Zielberuf unmittelbar nützlich ist.
       Übertrage die Tätigkeiten in die Fachsprache des Zielberufs.
-    Absatz 3 — Person und Sprache: Motivation in eigenen Worten des Kandidaten,
+    Absatz 3 — Person und Sprache: die nach obigen Regeln ausformulierte
+      Begründung für den Berufswunsch (nicht die Rohnotiz),
       Sprachkenntnisse mit Niveau, ein bis zwei belegte Stärken.
       Bei Bewerbern aus dem Ausland: Bereitschaft zum Umzug erwähnen,
       falls die Adresse nicht in Deutschland liegt.
@@ -764,7 +825,7 @@ JSON-STRUKTUR (genau einhalten):
   ],
   "interests": [{{"label": "Sport", "value": ""}}],
   "letter": {{
-    "recipient": "Firmenname\\nStraße\\nPLZ Ort",
+    "recipient": "Nur bekannte Angaben, jede Zeile durch \\n getrennt. Straße und PLZ NUR angeben, wenn sie in den Daten stehen — sonst weglassen. Keine Platzhalter.",
     "city": "Wohnort des Kandidaten, gefolgt von ', {today}' — z.B. 'Leipzig, {today}'",
     "subject": "Bewerbung um einen Ausbildungsplatz als ...",
     "salutation": "Sehr geehrte Damen und Herren,",
@@ -772,6 +833,76 @@ JSON-STRUKTUR (genau einhalten):
     "closing": "Mit freundlichen Grüßen"
   }}
 }}"""
+
+
+
+# ================= ОЧИСТКА ОТВЕТА МОДЕЛИ =================
+
+CYRILLIC = re.compile(r"[\u0400-\u04FF]")
+
+
+def _bad(fragment: str) -> bool:
+    """Есть ли в куске текста кириллица или заготовка в квадратных скобках."""
+    return bool(CYRILLIC.search(fragment)) or bool(re.search(r"\[[^\]]*\]", fragment))
+
+
+def sanitize_text(value: str) -> str:
+    """Убирает из немецкого текста то, чего там быть не должно.
+
+    Модель иногда цитирует ответ кандидата на русском прямо в письме
+    или оставляет заготовки вида [Adresse einfügen]. Просто вырезать их
+    нельзя — остаётся сломанная грамматика («Ab stehe ich zur Verfügung»).
+    Поэтому убираем целое предложение или строку, где встретилась проблема.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return value if isinstance(value, str) else value
+
+    t = value
+
+    # Сначала пробуем убрать только пояснительную вставку в скобках —
+    # предложение при этом обычно остаётся целым.
+    t = re.sub(r"\s*\([^()]*[\u0400-\u04FF][^()]*\)", "", t)
+
+    # Многострочные значения (блок получателя) чистим построчно
+    if "\n" in t:
+        lines = [ln for ln in t.split("\n") if ln.strip() and not _bad(ln)]
+        return "\n".join(ln.strip() for ln in lines)
+
+    # Прозу разбираем по предложениям, сохраняя знаки препинания
+    if _bad(t):
+        parts = re.split(r"(?<=[.!?])\s+", t)
+        kept = [s for s in parts if s.strip() and not _bad(s)]
+        t = " ".join(kept)
+
+    # Косметика после вырезаний
+    t = re.sub(r"\s{2,}", " ", t)
+    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
+    t = re.sub(r"\(\s*\)", "", t)
+    return t.strip()
+
+
+def clean_structure(obj):
+    """Рекурсивно чистит все строки в ответе модели."""
+    if isinstance(obj, str):
+        return sanitize_text(obj)
+    if isinstance(obj, list):
+        return [clean_structure(x) for x in obj if clean_structure(x) != ""]
+    if isinstance(obj, dict):
+        return {k: clean_structure(v) for k, v in obj.items()}
+    return obj
+
+
+def tidy_name(name: str) -> str:
+    """anton aliev → Anton Aliev. Имя в документе с маленькой буквы выглядит небрежно."""
+    if not name:
+        return name
+    def cap(word: str) -> str:
+        for sep in ("-", "'", "\u2019"):
+            if sep in word:
+                return sep.join(cap(w) for w in word.split(sep))
+        return word[:1].upper() + word[1:].lower() if word else word
+
+    return " ".join(cap(w) for w in name.split())
 
 
 def parse_json_response(text: str) -> dict:
@@ -811,7 +942,7 @@ async def generate_documents(message, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = await asyncio.to_thread(model.generate_content, prompt)
-        data = parse_json_response(response.text)
+        data = clean_structure(parse_json_response(response.text))
 
         # Личные данные берём из ответов пользователя, а не из фантазии модели
         personal = data.setdefault("personal", {})
@@ -819,6 +950,7 @@ async def generate_documents(message, context: ContextTypes.DEFAULT_TYPE):
                   "birth_date", "birth_place"):
             if d.get(k):
                 personal[k] = d[k]
+        personal["name"] = tidy_name(personal.get("name", ""))
 
         pdf_buf = build_pdf(data, d.get("photo"))
         name_clean = (d.get("name") or "Kandidat").replace(" ", "_")
@@ -1018,28 +1150,29 @@ RIGHT_W = 11.8 * cm
 def _styles():
     base = getSampleStyleSheet()
     return {
-        "doctitle": ParagraphStyle("doctitle", parent=base["Normal"], fontName="Helvetica",
+        "doctitle": ParagraphStyle("doctitle", parent=base["Normal"], fontName=FONT_REGULAR,
                                    fontSize=25, leading=29, textColor=DARK),
-        "section": ParagraphStyle("section", parent=base["Normal"], fontName="Helvetica",
+        "section": ParagraphStyle("section", parent=base["Normal"], fontName=FONT_REGULAR,
                                   fontSize=12.5, leading=15, textColor=DARK,
                                   spaceBefore=2, spaceAfter=3),
-        "label": ParagraphStyle("label", parent=base["Normal"], fontName="Helvetica",
+        "label": ParagraphStyle("label", parent=base["Normal"], fontName=FONT_REGULAR,
                                 fontSize=9, leading=13, textColor=LABEL),
-        "value": ParagraphStyle("value", parent=base["Normal"], fontName="Helvetica",
+        "value": ParagraphStyle("value", parent=base["Normal"], fontName=FONT_REGULAR,
                                 fontSize=9.5, leading=13.5, textColor=DARK),
-        "valuebold": ParagraphStyle("valuebold", parent=base["Normal"], fontName="Helvetica-Bold",
+        "valuebold": ParagraphStyle("valuebold", parent=base["Normal"], fontName=FONT_BOLD,
                                     fontSize=9.5, leading=13.5, textColor=DARK),
-        "bullet": ParagraphStyle("bullet", parent=base["Normal"], fontName="Helvetica",
+        "bullet": ParagraphStyle("bullet", parent=base["Normal"], fontName=FONT_REGULAR,
                                  fontSize=9.5, leading=13.5, textColor=DARK,
-                                 leftIndent=9, bulletIndent=0),
-        "letter": ParagraphStyle("letter", parent=base["Normal"], fontName="Helvetica",
+                                 leftIndent=9, bulletIndent=0,
+                                 bulletFontName=FONT_REGULAR),
+        "letter": ParagraphStyle("letter", parent=base["Normal"], fontName=FONT_REGULAR,
                                  fontSize=10, leading=15, alignment=TA_JUSTIFY,
                                  textColor=DARK, spaceAfter=9),
-        "letterline": ParagraphStyle("letterline", parent=base["Normal"], fontName="Helvetica",
+        "letterline": ParagraphStyle("letterline", parent=base["Normal"], fontName=FONT_REGULAR,
                                      fontSize=10, leading=14, textColor=DARK),
-        "right": ParagraphStyle("right", parent=base["Normal"], fontName="Helvetica",
+        "right": ParagraphStyle("right", parent=base["Normal"], fontName=FONT_REGULAR,
                                 fontSize=10, leading=14, alignment=TA_RIGHT, textColor=DARK),
-        "subject": ParagraphStyle("subject", parent=base["Normal"], fontName="Helvetica-Bold",
+        "subject": ParagraphStyle("subject", parent=base["Normal"], fontName=FONT_BOLD,
                                   fontSize=10.5, leading=14, textColor=DARK, spaceAfter=12),
     }
 
